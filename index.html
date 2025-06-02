@@ -1,0 +1,3572 @@
+import React, { useState, useEffect, useCallback } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, setDoc, getDoc, collection, query, onSnapshot } from 'firebase/firestore';
+
+// Tailwind CSS diasumsikan dimuat di lingkungan eksternal (misalnya, melalui CDN di index.html).
+// Tidak perlu import di sini karena diasumsikan sudah tersedia secara global.
+
+function App() {
+  // === Firebase State & Initialization ===
+  // State untuk menyimpan instance Firestore database
+  const [db, setDb] = useState(null);
+  // State untuk menyimpan instance Firebase Auth
+  const [auth, setAuth] = useState(null);
+  // State untuk menyimpan ID pengguna yang sedang login
+  const [userId, setUserId] = useState(null);
+  // State untuk menandakan apakah autentikasi Firebase sudah siap
+  const [isAuthReady, setIsAuthReady] = useState(false);
+
+  // Efek untuk menginisialisasi Firebase dan mengatur listener autentikasi
+  useEffect(() => {
+    try {
+      // Mengakses variabel global yang disediakan oleh lingkungan Canvas
+      // __app_id: ID aplikasi saat ini
+      // __firebase_config: Konfigurasi Firebase dalam bentuk string JSON
+      const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-mindflow-app';
+      const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+
+      // Memeriksa apakah konfigurasi Firebase tersedia
+      if (Object.keys(firebaseConfig).length === 0) {
+        console.error("Firebase config is missing. Please ensure __firebase_config is set in the environment.");
+        // Anda bisa menambahkan UI untuk menampilkan pesan error ini kepada pengguna
+        return;
+      }
+
+      // Menginisialisasi aplikasi Firebase
+      const app = initializeApp(firebaseConfig);
+      // Mendapatkan instance Firestore
+      const firestoreDb = getFirestore(app);
+      // Mendapatkan instance Firebase Auth
+      const firebaseAuth = getAuth(app);
+
+      // Menyimpan instance ke state
+      setDb(firestoreDb);
+      setAuth(firebaseAuth);
+
+      // Listener untuk perubahan status autentikasi
+      // Ini akan dipanggil setiap kali status login pengguna berubah
+      const unsubscribe = onAuthStateChanged(firebaseAuth, async (user) => {
+        if (user) {
+          // Jika ada pengguna yang login, set userId-nya
+          setUserId(user.uid);
+          console.log("Authenticated with Firebase UID:", user.uid);
+        } else {
+          // Jika tidak ada pengguna yang login, coba sign in
+          try {
+            // Coba sign in dengan custom token jika tersedia
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+              await signInWithCustomToken(firebaseAuth, __initial_auth_token);
+              console.log("Signed in with custom token.");
+            } else {
+              // Jika custom token tidak ada, sign in secara anonim
+              await signInAnonymously(firebaseAuth);
+              console.log("Signed in anonymously.");
+            }
+          } catch (error) {
+            console.error("Firebase authentication error:", error);
+            // Fallback: jika autentikasi gagal, gunakan ID acak
+            setUserId(crypto.randomUUID());
+            console.log("Authentication failed, using random UUID as userId.");
+          }
+        }
+        // Set isAuthReady menjadi true setelah status autentikasi awal diperiksa
+        setIsAuthReady(true);
+      });
+
+      // Fungsi cleanup untuk menghentikan listener saat komponen di-unmount
+      return () => unsubscribe();
+    } catch (error) {
+      console.error("Error initializing Firebase:", error);
+    }
+  }, []); // Efek ini hanya berjalan sekali saat komponen dimuat
+
+  // === Game State ===
+  // Mengelola layar yang sedang ditampilkan: 'home' atau 'game'
+  const [currentScreen, setCurrentScreen] = useState('home');
+  // Mengelola jenis game yang sedang dimainkan
+  const [gameType, setGameType] = useState(null);
+  // Mengelola level game saat ini
+  const [currentLevel, setCurrentLevel] = useState(1);
+  // Mengelola pesan yang ditampilkan kepada pengguna (misal: "Benar!", "Salah!")
+  const [message, setMessage] = useState('');
+  // Mengelola skor pemain
+  const [score, setScore] = useState(0);
+  // Mengelola apakah solusi puzzle ditampilkan
+  const [showSolution, setShowSolution] = useState(false);
+
+  // === State Spesifik untuk Setiap Jenis Game ===
+  // Equation Builder
+  const [equationPuzzle, setEquationPuzzle] = useState(null);
+  const [currentExpression, setCurrentExpression] = useState('');
+
+  // Spatial Arrangement
+  const [spatialPuzzle, setSpatialPuzzle] = useState(null); // { initialGrid, targetGrid, solutionMoves }
+  const [currentSpatialGrid, setCurrentSpatialGrid] = useState([]); // Grid pemain saat ini
+
+  // Shape Transformation
+  const [shapePuzzle, setShapePuzzle] = useState(null); // { initialShape, targetShape, solutionTransforms }
+  const [currentShape, setCurrentShape] = useState([]); // Bentuk pemain saat ini
+
+  // Number Grid Flow
+  const [numberGridPuzzle, setNumberGridPuzzle] = useState(null); // { grid, start, end, rule, solutionPath }
+  const [currentPath, setCurrentPath] = useState([]); // Jalur pemain saat ini
+
+  // Color Logic Bridge
+  const [colorLogicPuzzle, setColorLogicPuzzle] = useState(null); // { initialGrid, solutionGrid, rules }
+  const [currentColorGrid, setCurrentColorGrid] = useState([]); // Grid warna pemain saat ini
+
+  // Sequence Solver
+  const [sequencePuzzle, setSequenceSolverPuzzle] = useState(null); // { sequence, ruleDescription, nextNumber }
+  const [sequenceInput, setSequenceInput] = useState('');
+
+  // Target Sum
+  const [targetSumPuzzle, setTargetSumPuzzle] = useState(null); // { numbers, targetSum, solutionSubset }
+  const [selectedNumbers, setSelectedNumbers] = useState([]); // Digunakan juga untuk Number Sort untuk memilih 2 angka
+
+  // Pattern Matcher
+  const [patternMatcherPuzzle, setPatternMatcherPuzzle] = useState(null); // { patternSeries, options, correctOptionIndex }
+  const [selectedPatternOption, setSelectedPatternOption] = useState(null);
+
+  // Path Deduction
+  const [pathDeductionPuzzle, setPathDeductionPuzzle] = useState(null); // { grid, start, end, rules, solutionPath }
+  const [currentDeductionPath, setCurrentDeductionPath] = useState([]);
+
+  // Sudoku Mini
+  const [sudokuMiniPuzzle, setSudokuMiniPuzzle] = useState(null); // { initialGrid, solutionGrid }
+  const [currentSudokuGrid, setCurrentSudokuGrid] = useState([]);
+
+  // NEW GAMES STATES
+  // Memory Match
+  const [memoryPuzzle, setMemoryPuzzle] = useState(null); // { cards: [{value, isRevealed, isMatched}], pairsFound }
+  const [revealedCards, setRevealedCards] = useState([]); // Indices of currently revealed cards
+
+  // Color Sequence
+  const [colorSequencePuzzle, setColorSequencePuzzle] = useState(null); // { sequence, playerInput, isPlayingSequence }
+  const [playerSequenceInput, setPlayerSequenceInput] = useState([]);
+  const [isPlayingSequence, setIsPlayingSequence] = useState(false);
+  // const [sequenceStep, setSequenceStep] = useState(0); // Tidak digunakan secara langsung di UI, dihapus untuk kesederhanaan
+
+  // Number Sort
+  const [numberSortPuzzle, setNumberSortPuzzle] = useState(null); // { initialArray, sortedArray }
+  const [currentSortArray, setCurrentSortArray] = useState([]);
+
+  // Light Up Grid
+  const [lightUpPuzzle, setLightUpPuzzle] = useState(null); // { grid, solutionGrid }
+  const [currentLightGrid, setCurrentLightGrid] = useState([]);
+
+  // Block Jigsaw
+  const [blockJigsawPuzzle, setBlockJigsawPuzzle] = useState(null); // { targetGrid, shuffledGrid }
+  const [currentJigsawGrid, setCurrentJigsawGrid] = useState([]);
+
+  // Weight Balance
+  const [weightBalancePuzzle, setWeightBalancePuzzle] = useState(null); // { weights, targetBalance, solution }
+  const [leftTray, setLeftTray] = useState([]);
+  const [rightTray, setRightTray] = useState([]);
+
+  // Grid Sum
+  const [gridSumPuzzle, setGridSumPuzzle] = useState(null); // { initialGrid, rowSums, colSums, solutionGrid }
+  const [currentGridSumGrid, setCurrentGridSumGrid] = useState([]);
+
+  // Connect the Dots
+  const [connectDotsPuzzle, setConnectDotsPuzzle] = useState(null); // { dots: [{x,y,order}], solutionPath }
+  const [connectedLines, setConnectedLines] = useState([]); // [{fromDotIndex, toDotIndex}]
+  const [lastConnectedDot, setLastConnectedDot] = useState(null);
+
+  // Tile Flip
+  const [tileFlipPuzzle, setTileFlipPuzzle] = useState(null); // { initialGrid, targetGrid }
+  const [currentTileFlipGrid, setCurrentTileFlipGrid] = useState([]);
+
+  // Color Fill
+  const [colorFillPuzzle, setColorFillPuzzle] = useState(null); // { initialGrid, targetColor }
+  const [currentColorFillGrid, setCurrentColorFillGrid] = useState([]);
+  // const [fillStartingPoint, setFillStartingPoint] = useState(null); // Tidak digunakan secara langsung, dihapus untuk kesederhanaan
+
+
+  // === Sound Placeholder ===
+  // Fungsi placeholder untuk efek suara. Anda dapat mengintegrasikan pustaka audio di sini.
+  const playSoundEffect = useCallback((type) => {
+    console.log(`Playing sound effect: ${type}`);
+    // Contoh integrasi Tone.js atau Web Audio API:
+    // if (type === 'click') {
+    //   // Mainkan suara klik lembut
+    // } else if (type === 'correct') {
+    //   // Mainkan suara chime yang memuaskan
+    // } else if (type === 'incorrect') {
+    //   // Mainkan suara buzz
+    // }
+  }, []);
+
+  // === Utility Functions ===
+
+  // Fungsi untuk mengevaluasi ekspresi matematika dengan aman (kiri-ke-kanan)
+  const safeEval = useCallback((expression) => {
+    // Memisahkan angka dan operator dari ekspresi
+    const parts = expression.match(/(\d+\.?\d*)|([+\-*/])/g);
+    if (!parts || parts.length === 0) {
+      throw new Error("Ekspresi kosong atau tidak valid.");
+    }
+    let result = parseFloat(parts[0]); // Ambil angka pertama sebagai hasil awal
+
+    // Iterasi melalui bagian ekspresi untuk melakukan operasi
+    for (let i = 1; i < parts.length; i += 2) {
+      const operator = parts[i];
+      const nextNumber = parseFloat(parts[i + 1]);
+
+      if (isNaN(nextNumber)) {
+        throw new Error("Ekspresi tidak valid: angka hilang setelah operator.");
+      }
+
+      // Lakukan operasi berdasarkan operator
+      switch (operator) {
+        case '+': result += nextNumber; break;
+        case '-': result -= nextNumber; break;
+        case '*': result *= nextNumber; break;
+        case '/':
+          if (nextNumber === 0) { throw new Error("Pembagian dengan nol tidak diizinkan."); }
+          result /= nextNumber;
+          break;
+        default: throw new Error(`Operator tidak dikenal: ${operator}`);
+      }
+    }
+    return result;
+  }, []);
+
+  // Helper untuk memilih operator acak dari array
+  const getRandomOperator = useCallback((ops) => ops[Math.floor(Math.random() * ops.length)], []);
+
+  // Helper untuk mendapatkan bilangan bulat acak dalam rentang [min, max]
+  const getRandomInt = useCallback((min, max) => Math.floor(Math.random() * (max - min + 1)) + min, []);
+
+  // Fungsi untuk mengkloning array 2D secara mendalam (deep clone)
+  const deepClone2DArray = useCallback((arr) => JSON.parse(JSON.stringify(arr)), []);
+
+  // Fungsi untuk mengacak array
+  const shuffleArray = useCallback((array) => {
+    const newArray = [...array];
+    for (let i = newArray.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [newArray[i], newArray[j]] = [newArray[j], newArray[i]];
+    }
+    return newArray;
+  }, []);
+
+  // === Puzzle Generation Functions ===
+
+  // Equation Builder Puzzle Generation
+  const generateSolvableEquation = useCallback((level) => {
+    let target;
+    let numbers = [];
+    let solutionExpression = '';
+    const operators = ['+', '-', '*', '/'];
+
+    // Logika pembuatan puzzle berdasarkan level
+    if (level === 1) { // Level mudah: 2 angka, tambah/kurang
+      const num1 = getRandomInt(1, 5);
+      const num2 = getRandomInt(1, 5);
+      const op = getRandomOperator(['+', '-']);
+      solutionExpression = `${num1}${op}${num2}`;
+      try { target = safeEval(solutionExpression); } catch (e) { return generateSolvableEquation(level); } // Coba lagi jika ada error
+      numbers = [num1, num2];
+    } else if (level === 2) { // Level menengah: 3 angka, semua operator
+      const num1 = getRandomInt(1, 7);
+      const num2 = getRandomInt(1, 7);
+      const num3 = getRandomInt(1, 5);
+      const op1 = getRandomOperator(['+', '-']);
+      const op2 = getRandomOperator(operators);
+
+      solutionExpression = `${num1}${op1}${num2}${op2}${num3}`;
+      try {
+        const intermediateResult = safeEval(`${num1}${op1}${num2}`);
+        // Hindari pembagian yang menghasilkan desimal atau pembagian dengan nol
+        if (op2 === '/' && (num3 === 0 || intermediateResult % num3 !== 0)) {
+          return generateSolvableEquation(level);
+        }
+        target = safeEval(solutionExpression);
+      } catch (e) { return generateSolvableEquation(level); }
+      numbers = [num1, num2, num3];
+    } else { // Level sulit: lebih banyak angka, semua operator
+      const numCount = Math.min(level + 2, 5); // Jumlah angka bertambah seiring level, maks 5
+      numbers = Array.from({ length: numCount }, () => getRandomInt(1, 10));
+      solutionExpression = numbers[0].toString();
+      for (let i = 1; i < numCount; i++) {
+        const op = getRandomOperator(operators);
+        if (op === '/') {
+          let currentNum = numbers[i];
+          let prevResult;
+          try {
+            prevResult = safeEval(solutionExpression);
+            // Pastikan pembagian menghasilkan bilangan bulat dan bukan pembagian dengan nol
+            if (prevResult % currentNum !== 0 || currentNum === 0) {
+              return generateSolvableEquation(level); // Coba lagi jika tidak valid
+            }
+          } catch (e) { return generateSolvableEquation(level); }
+        }
+        solutionExpression += op + numbers[i];
+      }
+      try { target = safeEval(solutionExpression); } catch (e) { return generateSolvableEquation(level); }
+    }
+    return { target, numbers: numbers, availableOperators: operators, solutionExpression };
+  }, [safeEval, getRandomOperator, getRandomInt]);
+
+  // Spatial Arrangement Puzzle Generation (2x2 grid)
+  const generateSpatialPuzzle = useCallback(() => {
+    const colors = ['red', 'blue', 'green', 'yellow'];
+    // Buat grid target dengan warna acak
+    const targetGrid = [...colors].sort(() => Math.random() - 0.5);
+    let initialGrid = [...colors].sort(() => Math.random() - 0.5);
+    // Pastikan grid awal berbeda dari grid target
+    while (JSON.stringify(initialGrid) === JSON.stringify(targetGrid)) {
+      initialGrid = [...colors].sort(() => Math.random() - 0.5);
+    }
+    // Tambahkan satu tempat kosong di grid awal
+    const emptySpotIndex = getRandomInt(0, 3);
+    initialGrid[emptySpotIndex] = null;
+    const solutionMoves = "Pindahkan blok agar sesuai dengan pola target di bawah.";
+    return { initialGrid, targetGrid, solutionMoves };
+  }, [getRandomInt]);
+
+  // Shape Transformation Puzzle Generation (2x2 binary grid)
+  const generateShapePuzzle = useCallback(() => {
+    // Beberapa bentuk dasar yang mungkin
+    const baseShapes = [
+      [[1, 0], [0, 0]], [[0, 1], [0, 0]], [[1, 1], [0, 0]], [[1, 0], [1, 0]],
+      [[1, 1], [1, 0]], [[1, 1], [1, 1]],
+    ];
+    const initialShape = baseShapes[getRandomInt(0, baseShapes.length - 1)];
+    let targetShape = deepClone2DArray(initialShape);
+    let solutionTransforms = [];
+    const numTransforms = getRandomInt(1, 3); // Terapkan 1 hingga 3 transformasi
+
+    // Terapkan transformasi acak ke bentuk target
+    for (let i = 0; i < numTransforms; i++) {
+      const transformType = getRandomInt(0, 2); // 0: rotate, 1: flipH, 2: flipV
+      if (transformType === 0) {
+        // Rotasi 90 derajat searah jarum jam
+        targetShape = targetShape[0].map((val, index) => targetShape.map(row => row[index]).reverse());
+        solutionTransforms.push("Putar 90° Searah Jarum Jam");
+      } else if (transformType === 1) {
+        // Balik Horizontal
+        targetShape = targetShape.map(row => [...row].reverse());
+        solutionTransforms.push("Balik Horizontal");
+      } else {
+        // Balik Vertikal
+        targetShape = [...targetShape].reverse();
+        solutionTransforms.push("Balik Vertikal");
+      }
+    }
+    return { initialShape, targetShape, solutionTransforms };
+  }, [getRandomInt, deepClone2DArray]);
+
+  // Number Grid Flow Puzzle Generation (3x3 grid)
+  const generateNumberGridPuzzle = useCallback((level) => {
+    const size = 3;
+    let grid = Array(size).fill(0).map(() => Array(size).fill(0));
+    // Tentukan titik mulai dan akhir secara acak
+    let start = { row: getRandomInt(0, size - 1), col: getRandomInt(0, size - 1) };
+    let end = { row: getRandomInt(0, size - 1), col: getRandomInt(0, size - 1) };
+    // Pastikan titik mulai dan akhir tidak sama
+    while (start.row === end.row && start.col === end.col) {
+      end = { row: getRandomInt(0, size - 1), col: getRandomInt(0, size - 1) };
+    }
+
+    // Tentukan aturan (tambah atau kurang) dan nilai aturan
+    const rule = getRandomInt(1, 2) === 1 ? '+' : '-';
+    const ruleValue = getRandomInt(2, 5);
+
+    // Isi grid dengan angka acak
+    for (let r = 0; r < size; r++) {
+      for (let c = 0; c < size; c++) {
+        grid[r][c] = getRandomInt(10, 50);
+      }
+    }
+    // Set nilai di titik mulai dan akhir
+    grid[start.row][start.col] = getRandomInt(10, 30);
+    grid[end.row][end.col] = getRandomInt(10, 30);
+
+    // Buat jalur solusi sederhana (hanya untuk ditampilkan sebagai petunjuk)
+    const solutionPath = [];
+    let currentRow = start.row;
+    let currentCol = start.col;
+    let currentValue = grid[currentRow][currentCol];
+
+    solutionPath.push({ row: currentRow, col: currentCol, value: currentValue });
+
+    // Bergerak menuju titik akhir
+    while (currentRow !== end.row || currentCol !== end.col) {
+      const nextMoves = [];
+      // Tambahkan gerakan yang mungkin (atas, bawah, kiri, kanan)
+      if (currentRow < end.row) nextMoves.push({ row: currentRow + 1, col: currentCol });
+      if (currentRow > end.row) nextMoves.push({ row: currentRow - 1, col: currentCol });
+      if (currentCol < end.col) nextMoves.push({ row: currentRow, col: currentCol + 1 });
+      if (currentCol > end.col) nextMoves.push({ row: currentRow, col: currentCol - 1 });
+
+      if (nextMoves.length === 0) break; // Berhenti jika tidak ada gerakan yang mungkin
+
+      // Pilih gerakan pertama (simplifikasi, tidak mencari jalur optimal)
+      const nextMove = nextMoves[0];
+      currentRow = nextMove.row;
+      currentCol = nextMove.col;
+      currentValue = grid[currentRow][currentCol];
+      solutionPath.push({ row: currentRow, col: currentCol, value: currentValue });
+    }
+
+    return { grid, start, end, rule, ruleValue, solutionPath };
+  }, [getRandomInt]);
+
+
+  // Color Logic Bridge Puzzle Generation (3x3 grid)
+  const generateColorLogicPuzzle = useCallback(() => {
+    const colors = ['bg-red-300', 'bg-blue-300', 'bg-green-300', 'bg-yellow-300'];
+    const numColors = colors.length;
+    const size = 3;
+    let initialGrid = Array(size).fill(0).map(() => Array(size).fill(null));
+    let solutionGrid = Array(size).fill(0).map(() => Array(size).fill(null));
+
+    // Isi beberapa sel awal secara acak
+    for (let i = 0; i < getRandomInt(3, 5); i++) {
+      const r = getRandomInt(0, size - 1);
+      const c = getRandomInt(0, size - 1);
+      initialGrid[r][c] = colors[getRandomInt(0, numColors - 1)];
+      solutionGrid[r][c] = initialGrid[r][c]; // Salin ke solutionGrid
+    }
+
+    // Aturan untuk puzzle ini
+    const rules = [
+      "Setiap baris dan kolom harus memiliki setidaknya dua warna berbeda.",
+      "Tidak boleh ada tiga sel berwarna sama yang berurutan (horizontal/vertikal)."
+    ];
+
+    // Isi sisa sel solutionGrid secara acak (ini adalah solusi sederhana)
+    // Untuk puzzle yang lebih kompleks, Anda perlu algoritma yang memastikan aturan terpenuhi.
+    for(let r = 0; r < size; r++) {
+        for(let c = 0; c < size; c++) {
+            if (solutionGrid[r][c] === null) {
+                solutionGrid[r][c] = colors[getRandomInt(0, numColors - 1)];
+            }
+        }
+    }
+    return { initialGrid, solutionGrid, rules };
+  }, [getRandomInt]);
+
+  // Sequence Solver Puzzle Generation
+  const generateSequenceSolverPuzzle = useCallback((level) => {
+    let sequence = [];
+    let ruleDescription = "";
+    let nextNumber;
+    let startNum = getRandomInt(1, 10);
+    let commonDiff = getRandomInt(2, 5);
+    let isAddition = Math.random() > 0.5;
+
+    if (level === 1) { // Level mudah: deret aritmatika sederhana
+      ruleDescription = isAddition ? `Tambah ${commonDiff}` : `Kurang ${commonDiff}`;
+      for (let i = 0; i < 4; i++) {
+        sequence.push(startNum);
+        startNum = isAddition ? startNum + commonDiff : startNum - commonDiff;
+      }
+      nextNumber = startNum;
+    } else { // Level lebih kompleks: perkalian atau operasi bergantian
+      if (Math.random() > 0.5) { // Perkalian
+        commonDiff = getRandomInt(2, 3); // Pengali
+        ruleDescription = `Kali ${commonDiff}`;
+        for (let i = 0; i < 4; i++) {
+          sequence.push(startNum);
+          startNum *= commonDiff;
+        }
+        nextNumber = startNum;
+      } else { // Operasi tambah/kurang bergantian
+        let diff1 = getRandomInt(2, 4);
+        let diff2 = getRandomInt(2, 4);
+        ruleDescription = `Bergantian tambah ${diff1} dan kurang ${diff2}`;
+        for (let i = 0; i < 4; i++) {
+          sequence.push(startNum);
+          startNum = (i % 2 === 0) ? startNum + diff1 : startNum - diff2;
+        }
+        nextNumber = (4 % 2 === 0) ? startNum + diff1 : startNum - diff2;
+      }
+    }
+    return { sequence, ruleDescription, nextNumber };
+  }, [getRandomInt]);
+
+  // Target Sum Puzzle Generation
+  const generateTargetSumPuzzle = useCallback((level) => {
+    let numbers = [];
+    let targetSum;
+    let solutionSubset = [];
+    const numCount = getRandomInt(5, 8); // Jumlah angka yang tersedia
+    numbers = Array.from({ length: numCount }, () => getRandomInt(1, 20)); // Angka acak antara 1 dan 20
+
+    // Cara sederhana untuk memastikan ada subset yang dapat dipecahkan:
+    // Pilih beberapa angka secara acak dari 'numbers' dan jumlahkan sebagai target.
+    const subsetSize = getRandomInt(2, Math.min(4, numCount)); // Ukuran subset antara 2 dan 4
+    let tempNumbers = [...numbers].sort(() => Math.random() - 0.5); // Acak angka sementara
+    for (let i = 0; i < subsetSize; i++) {
+      solutionSubset.push(tempNumbers[i]);
+    }
+    targetSum = solutionSubset.reduce((sum, num) => sum + num, 0); // Hitung target sum
+
+    return { numbers, targetSum, solutionSubset };
+  }, [getRandomInt]);
+
+  // Pattern Matcher Puzzle Generation
+  const generatePatternMatcherPuzzle = useCallback(() => {
+    const patterns = [
+      '🟥', '🟦', '🟩', '🟨', // Warna dasar
+      '▲', '▼', '◀', '▶', // Bentuk segitiga
+      '⭐', '🌙', '☀️', // Bintang, bulan, matahari
+      '⚪', '⚫', // Lingkaran
+    ];
+    const seriesLength = getRandomInt(3, 4); // Panjang deret pola
+    let patternSeries = [];
+    let lastPatternIndex = -1;
+
+    // Hasilkan deret pola sederhana (misal: berulang atau bergantian)
+    for (let i = 0; i < seriesLength; i++) {
+      let nextPatternIndex;
+      do {
+        nextPatternIndex = getRandomInt(0, patterns.length - 1);
+      } while (nextPatternIndex === lastPatternIndex && seriesLength > 1); // Hindari pengulangan langsung
+      patternSeries.push(patterns[nextPatternIndex]);
+      lastPatternIndex = nextPatternIndex;
+    }
+
+    // Tentukan pola berikutnya berdasarkan aturan sederhana
+    let correctOptionPattern;
+    let ruleDesc = "";
+    if (Math.random() > 0.5 && seriesLength > 1) { // Ulangi pola terakhir
+      correctOptionPattern = patternSeries[seriesLength - 1];
+      ruleDesc = "Ulangi pola terakhir";
+    } else { // Pilih pola acak yang berbeda dari pola terakhir
+      let newPatternIndex;
+      do {
+        newPatternIndex = getRandomInt(0, patterns.length - 1);
+      } while (patterns[newPatternIndex] === patternSeries[seriesLength - 1]);
+      correctOptionPattern = patterns[newPatternIndex];
+      ruleDesc = "Pola berikutnya adalah pola acak yang berbeda dari pola terakhir"; // Aturan disederhanakan
+    }
+
+    // Hasilkan opsi pilihan, termasuk opsi yang benar
+    let options = new Set();
+    options.add(correctOptionPattern);
+    while (options.size < 4) { // Pastikan ada 4 opsi unik
+      options.add(patterns[getRandomInt(0, patterns.length - 1)]);
+    }
+    options = Array.from(options).sort(() => Math.random() - 0.5); // Acak urutan opsi
+
+    const correctOptionIndex = options.indexOf(correctOptionPattern);
+
+    return { patternSeries, options, correctOptionIndex, ruleDesc };
+  }, [getRandomInt]);
+
+  // Path Deduction Puzzle Generation (3x3 grid)
+  const generatePathDeductionPuzzle = useCallback(() => {
+    const size = 3;
+    let grid = Array(size).fill(0).map(() => Array(size).fill('')); // Grid kosong
+    // Tentukan titik mulai dan akhir
+    let start = { row: getRandomInt(0, size - 1), col: getRandomInt(0, size - 1) };
+    let end = { row: getRandomInt(0, size - 1), col: getRandomInt(0, size - 1) };
+    // Pastikan mulai dan akhir tidak sama
+    while (start.row === end.row && start.col === end.col) {
+      end = { row: getRandomInt(0, size - 1), col: getRandomInt(0, size - 1) };
+    }
+
+    grid[start.row][start.col] = 'START';
+    grid[end.row][end.col] = 'END';
+
+    const rules = [];
+    const ruleType = getRandomInt(0, 1); // 0: hanya kardinal, 1: hanya diagonal
+
+    if (ruleType === 0) {
+      rules.push("Hanya boleh bergerak secara horizontal atau vertikal (atas, bawah, kiri, kanan).");
+    } else {
+      rules.push("Hanya boleh bergerak secara diagonal.");
+    }
+
+    // Pembuatan jalur solusi yang disederhanakan (jalur langsung, tidak mempertimbangkan rintangan)
+    const solutionPath = [];
+    let currentRow = start.row;
+    let currentCol = start.col;
+    solutionPath.push({ row: currentRow, col: currentCol });
+
+    while (currentRow !== end.row || currentCol !== end.col) {
+      let nextRow = currentRow;
+      let nextCol = currentCol;
+
+      if (ruleType === 0) { // Gerakan kardinal
+        if (currentRow < end.row) nextRow++;
+        else if (currentRow > end.row) nextRow--;
+        else if (currentCol < end.col) nextCol++;
+        else if (currentCol > end.col) nextCol--;
+      } else { // Gerakan diagonal
+        if (currentRow < end.row) nextRow++;
+        else if (currentRow > end.row) nextRow--;
+        if (currentCol < end.col) nextCol++;
+        else if (currentCol > end.col) nextCol--;
+      }
+
+      // Hindari loop tak terbatas jika jalur macet
+      if (nextRow === currentRow && nextCol === currentCol) {
+          return generatePathDeductionPuzzle(); // Regenerasi puzzle jika macet
+      }
+
+      currentRow = nextRow;
+      currentCol = nextCol;
+      solutionPath.push({ row: currentRow, col: currentCol });
+    }
+
+    return { grid, start, end, rules, solutionPath };
+  }, [getRandomInt]);
+
+  // Sudoku Mini (3x3) Puzzle Generation
+  const generateSudokuMiniPuzzle = useCallback(() => {
+    const size = 3;
+    let solutionGrid = Array(size).fill(0).map(() => Array(size).fill(0));
+    let initialGrid = Array(size).fill(0).map(() => Array(size).fill(null));
+
+    // Fungsi bantu untuk mengisi grid Sudoku menggunakan backtracking sederhana
+    const fillGrid = (grid) => {
+      for (let r = 0; r < size; r++) {
+        for (let c = 0; c < size; c++) {
+          if (grid[r][c] === 0) { // Jika sel kosong
+            const numbers = shuffleArray([1, 2, 3]); // Coba angka 1-3 secara acak
+            for (let num of numbers) {
+              // Periksa validitas: tidak ada di baris, kolom, atau blok 1x3
+              const isValid =
+                !grid[r].includes(num) && // Cek baris
+                !grid.map(row => row[c]).includes(num); // Cek kolom
+                // Untuk 3x3, blok 1x3 adalah baris/kolom itu sendiri, jadi tidak perlu cek terpisah
+
+              if (isValid) {
+                grid[r][c] = num;
+                if (fillGrid(grid)) { // Rekursif mengisi sisa grid
+                  return true;
+                }
+                grid[r][c] = 0; // Backtrack jika rekursi gagal
+              }
+            }
+            return false; // Tidak ada angka yang valid untuk sel ini
+          }
+        }
+      }
+      return true; // Grid berhasil terisi
+    };
+
+    // Coba mengisi grid solusi sampai berhasil
+    let success = false;
+    let attempts = 0;
+    while (!success && attempts < 500) { // Batasi upaya untuk menghindari loop tak terbatas
+      solutionGrid = Array(size).fill(0).map(() => Array(size).fill(0)); // Reset grid
+      success = fillGrid(solutionGrid);
+      attempts++;
+    }
+    if (!success) {
+      console.warn("Gagal menghasilkan puzzle Sudoku yang solvable setelah beberapa upaya. Menggunakan grid default.");
+      // Fallback ke grid sederhana jika generasi gagal
+      solutionGrid = [[1, 2, 3], [2, 3, 1], [3, 1, 2]];
+    }
+
+
+    // Hapus beberapa angka untuk membuat puzzle awal
+    initialGrid = deepClone2DArray(solutionGrid);
+    const cellsToClear = getRandomInt(3, 5); // Hapus 3-5 sel
+    for (let i = 0; i < cellsToClear; i++) {
+      const r = getRandomInt(0, size - 1);
+      const c = getRandomInt(0, size - 1);
+      initialGrid[r][c] = null; // Set sel menjadi kosong
+    }
+
+    return { initialGrid, solutionGrid };
+  }, [getRandomInt, deepClone2DArray, shuffleArray]);
+
+  // NEW GAME GENERATION FUNCTIONS
+  // Memory Match Puzzle Generation
+  const generateMemoryPuzzle = useCallback((level) => {
+    const symbols = ['🍎', '🍌', '🍇', '🍋', '🍓', '🍍', '🥝', '🥭', '🍒', '🥥']; // Tambah lebih banyak simbol
+    const numPairs = Math.min(level + 2, 8); // Max 8 pairs (16 kartu)
+    let selectedSymbols = shuffleArray(symbols.slice(0, numPairs));
+    let cards = [...selectedSymbols, ...selectedSymbols]; // Duplicate for pairs
+    cards = shuffleArray(cards).map((value, index) => ({
+      id: index, // Unique ID for each card instance
+      value,
+      isRevealed: false,
+      isMatched: false,
+    }));
+    return { cards, pairsFound: 0, totalPairs: numPairs };
+  }, [shuffleArray]);
+
+  // Color Sequence Puzzle Generation
+  const generateColorSequencePuzzle = useCallback((level) => {
+    const colors = ['red', 'blue', 'green', 'yellow', 'purple', 'orange']; // Lebih banyak warna
+    const sequenceLength = Math.min(level + 2, 6); // Max 6 colors in sequence
+    let sequence = Array.from({ length: sequenceLength }, () => colors[getRandomInt(0, colors.length - 1)]);
+    return { sequence, playerInput: [], isPlayingSequence: false };
+  }, [getRandomInt]);
+
+  // Number Sort Puzzle Generation
+  const generateNumberSortPuzzle = useCallback((level) => {
+    const arraySize = Math.min(level + 3, 8); // Max 8 numbers
+    let initialArray = Array.from({ length: arraySize }, () => getRandomInt(1, 100)); // Rentang angka lebih besar
+    let sortedArray = [...initialArray].sort((a, b) => a - b);
+    return { initialArray, sortedArray };
+  }, [getRandomInt]);
+
+  // Light Up Grid Puzzle Generation
+  const generateLightUpPuzzle = useCallback((level) => {
+    const size = Math.min(level + 2, 5); // Max 5x5 grid
+    let initialGrid = Array(size).fill(0).map(() => Array(size).fill(false)); // false = off, true = on
+
+    // Generate initial state by simulating random flips from a solved (all true) state
+    let tempGrid = Array(size).fill(0).map(() => Array(size).fill(true)); // Start with all true (solved)
+    const flipCellAndNeighbors = (grid, r, c) => {
+      grid[r][c] = !grid[r][c];
+      if (r > 0) grid[r - 1][c] = !grid[r - 1][c]; // Top
+      if (r < size - 1) grid[r + 1][c] = !grid[r + 1][c]; // Bottom
+      if (c > 0) grid[r][c - 1] = !grid[r][c - 1]; // Left
+      if (c < size - 1) grid[r][c + 1] = !grid[r][c + 1]; // Right
+    };
+
+    const clicksToSimulate = getRandomInt(size * 2, size * size); // Jumlah klik untuk menghasilkan puzzle
+    for (let i = 0; i < clicksToSimulate; i++) {
+      const r = getRandomInt(0, size - 1);
+      const c = getRandomInt(0, size - 1);
+      flipCellAndNeighbors(tempGrid, r, c); // Terapkan klik ke grid sementara
+    }
+    initialGrid = tempGrid; // Ini adalah grid awal yang akan ditampilkan pemain
+
+    return { grid: initialGrid, solutionGrid: Array(size).fill(0).map(() => Array(size).fill(true)), size }; // Target selalu semua true
+  }, [getRandomInt, deepClone2DArray]);
+
+  // Block Jigsaw Puzzle Generation
+  const generateBlockJigsawPuzzle = useCallback((level) => {
+    const gridSize = Math.min(level + 1, 4); // Max 4x4
+    const totalCells = gridSize * gridSize;
+    const colors = ['red', 'blue', 'green', 'yellow', 'purple', 'teal', 'orange', 'pink', 'cyan', 'lime', 'indigo', 'gray']; // Lebih banyak warna
+    let targetPattern = [];
+    for (let i = 0; i < totalCells; i++) {
+      targetPattern.push(`bg-${colors[getRandomInt(0, colors.length - 1)]}-500`);
+    }
+    let targetGrid = [];
+    for (let i = 0; i < gridSize; i++) {
+      targetGrid.push(targetPattern.slice(i * gridSize, (i + 1) * gridSize));
+    }
+
+    let shuffledGridFlat = shuffleArray(targetPattern);
+    let initialGrid = [];
+    for (let i = 0; i < gridSize; i++) {
+      initialGrid.push(shuffledGridFlat.slice(i * gridSize, (i + 1) * gridSize));
+    }
+    return { initialGrid, targetGrid, gridSize };
+  }, [getRandomInt, shuffleArray]);
+
+  // Weight Balance Puzzle Generation
+  const generateWeightBalancePuzzle = useCallback((level) => {
+    const weightsPool = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]; // Lebih banyak pilihan berat
+    const numWeights = Math.min(level + 4, 10); // Max 10 berat yang tersedia
+    let availableWeights = shuffleArray(weightsPool).slice(0, numWeights);
+
+    let targetBalance;
+    let solutionLeft = [];
+    let solutionRight = [];
+    let foundSolvable = false;
+    let attempts = 0;
+
+    // Coba beberapa kali untuk menghasilkan puzzle yang solvable dan seimbang
+    while (!foundSolvable && attempts < 100) {
+      targetBalance = getRandomInt(5, 30); // Rentang target balance yang lebih besar
+      solutionLeft = [];
+      solutionRight = [];
+      const remainingWeights = [...availableWeights];
+
+      // Fungsi rekursif untuk menemukan subset yang cocok dengan target
+      const findSubset = (arr, target, currentSubset = [], startIndex = 0) => {
+        const currentSum = currentSubset.reduce((sum, val) => sum + val, 0);
+        if (currentSum === target) {
+          return currentSubset;
+        }
+        if (currentSum > target || startIndex === arr.length) {
+          return null;
+        }
+
+        // Coba dengan elemen saat ini
+        let resultWith = findSubset(arr, target, [...currentSubset, arr[startIndex]], startIndex + 1);
+        if (resultWith) return resultWith;
+
+        // Coba tanpa elemen saat ini
+        let resultWithout = findSubset(arr, target, currentSubset, startIndex + 1);
+        return resultWithout;
+      };
+
+      // Cari subset untuk nampan kiri
+      solutionLeft = findSubset(remainingWeights, targetBalance);
+
+      if (solutionLeft) {
+        // Buat array berat yang tersisa setelah nampan kiri diisi
+        const usedWeights = new Set(solutionLeft);
+        const remainingForRight = remainingWeights.filter(w => !usedWeights.has(w));
+
+        // Cari subset untuk nampan kanan dari berat yang tersisa
+        solutionRight = findSubset(remainingForRight, targetBalance);
+
+        if (solutionRight && solutionRight.length > 0) { // Pastikan nampan kanan juga punya berat
+          foundSolvable = true;
+        }
+      }
+      attempts++;
+    }
+
+    if (!foundSolvable) {
+      console.warn("Gagal menghasilkan puzzle Weight Balance yang solvable, menggunakan default.");
+      // Fallback ke puzzle sederhana jika generasi gagal
+      availableWeights = [1, 2, 3, 4, 5, 6];
+      targetBalance = 6;
+      solutionLeft = [1, 2, 3];
+      solutionRight = [6];
+    }
+
+    return { availableWeights, targetBalance, solutionLeft, solutionRight };
+  }, [getRandomInt, shuffleArray]);
+
+  // Grid Sum Puzzle Generation
+  const generateGridSumPuzzle = useCallback((level) => {
+    const size = Math.min(level + 2, 5); // Max 5x5 grid
+    let solutionGrid = Array(size).fill(0).map(() => Array(size).fill(0));
+    let initialGrid = Array(size).fill(0).map(() => Array(size).fill(null));
+
+    // Fill solution grid with random numbers 1-9
+    for (let r = 0; r < size; r++) {
+      for (let c = 0; c < size; c++) {
+        solutionGrid[r][c] = getRandomInt(1, 9);
+      }
+    }
+
+    // Calculate row and column sums
+    const rowSums = solutionGrid.map(row => row.reduce((sum, val) => sum + val, 0));
+    const colSums = Array(size).fill(0).map((_, c) => solutionGrid.reduce((sum, row) => sum + row[c], 0));
+
+    // Clear some cells for the puzzle
+    const cellsToClear = getRandomInt(size * 2, size * size - (size + 1)); // Clear a good portion, leave some filled
+    let clearedCount = 0;
+    while (clearedCount < cellsToClear) {
+      const r = getRandomInt(0, size - 1);
+      const c = getRandomInt(0, size - 1);
+      if (initialGrid[r][c] !== null) { // Hanya hapus jika belum dihapus
+        initialGrid[r][c] = null; // Set to null for empty cells
+        clearedCount++;
+      }
+    }
+    // Pastikan setidaknya ada beberapa sel yang terisi di awal
+    if (initialGrid.flat().every(cell => cell === null)) {
+      initialGrid[getRandomInt(0, size - 1)][getRandomInt(0, size - 1)] = solutionGrid[getRandomInt(0, size - 1)][getRandomInt(0, size - 1)];
+    }
+
+
+    return { initialGrid, rowSums, colSums, solutionGrid, size };
+  }, [getRandomInt]);
+
+  // Connect the Dots Puzzle Generation
+  const generateConnectDotsPuzzle = useCallback((level) => {
+    const numDots = Math.min(level + 3, 8); // Max 8 dots
+    const dots = [];
+    const gridSize = 350; // Assume a 350x350 area for dots, slightly larger for more dots
+
+    // Generate random dot positions, ensure some separation
+    const minDistance = 40; // Minimum distance between dots
+    for (let i = 0; i < numDots; i++) {
+      let newDot;
+      let collision;
+      do {
+        collision = false;
+        newDot = {
+          id: i,
+          order: i + 1,
+          x: getRandomInt(20, gridSize - 20),
+          y: getRandomInt(20, gridSize - 20),
+        };
+        // Check collision with existing dots
+        for (let existingDot of dots) {
+          const dist = Math.sqrt(Math.pow(newDot.x - existingDot.x, 2) + Math.pow(newDot.y - existingDot.y, 2));
+          if (dist < minDistance) {
+            collision = true;
+            break;
+          }
+        }
+      } while (collision);
+      dots.push(newDot);
+    }
+
+    // Solution path is simply connecting dots by their order
+    const solutionPath = [];
+    for (let i = 0; i < numDots - 1; i++) {
+      solutionPath.push({ from: i + 1, to: i + 2 });
+    }
+
+    return { dots, solutionPath, gridSize };
+  }, [getRandomInt]);
+
+  // Tile Flip Puzzle Generation
+  const generateTileFlipPuzzle = useCallback((level) => {
+    const size = Math.min(level + 2, 5); // Max 5x5 grid
+    let initialGrid = Array(size).fill(0).map(() => Array(size).fill(false)); // false = dark, true = light
+    let targetGrid = Array(size).fill(0).map(() => Array(size).fill(true)); // Target: all true (all lit)
+
+    // Generate initial state by simulating random flips from a solved (all true) state
+    let tempGrid = deepClone2DArray(targetGrid); // Start with the solved state
+    const flipCellAndNeighbors = (grid, r, c) => {
+      grid[r][c] = !grid[r][c];
+      if (r > 0) grid[r - 1][c] = !grid[r - 1][c];
+      if (r < size - 1) grid[r + 1][c] = !grid[r + 1][c];
+      if (c > 0) grid[r][c - 1] = !grid[r][c - 1];
+      if (c < size - 1) grid[r][c + 1] = !grid[r][c + 1];
+    };
+
+    const numFlips = getRandomInt(size * 2, size * size); // Jumlah flip untuk menghasilkan puzzle
+    for (let i = 0; i < numFlips; i++) {
+      const r = getRandomInt(0, size - 1);
+      const c = getRandomInt(0, size - 1);
+      flipCellAndNeighbors(tempGrid, r, c); // Terapkan flip ke grid sementara
+    }
+    initialGrid = tempGrid; // Ini adalah grid awal yang akan ditampilkan pemain
+
+    return { initialGrid, targetGrid, size };
+  }, [getRandomInt, deepClone2DArray]);
+
+  // Color Fill Puzzle Generation
+  const generateColorFillPuzzle = useCallback((level) => {
+    const size = Math.min(level + 2, 5); // Max 5x5 grid
+    const colors = ['bg-red-300', 'bg-blue-300', 'bg-green-300', 'bg-yellow-300', 'bg-purple-300']; // Lebih banyak warna
+    let initialGrid = Array(size).fill(0).map(() => Array(size).fill(null));
+
+    // Fill grid with random colors
+    for (let r = 0; r < size; r++) {
+      for (let c = 0; c < size; c++) {
+        initialGrid[r][c] = colors[getRandomInt(0, colors.length - 1)];
+      }
+    }
+
+    // Pick a random target color
+    const targetColor = colors[getRandomInt(0, colors.length - 1)];
+
+    return { initialGrid, targetColor, size };
+  }, [getRandomInt]);
+
+
+  // === Game Logic Handlers ===
+
+  // Handler umum untuk memulai game baru
+  const handleStartGame = useCallback((type) => {
+    setGameType(type);
+    setCurrentScreen('game');
+    setCurrentLevel(1);
+    setScore(0);
+    setMessage('');
+    setShowSolution(false);
+    playSoundEffect('start_game');
+    setSelectedNumbers([]); // Reset selected numbers for games like Number Sort
+
+    // Reset state spesifik game dan buat puzzle pertama
+    if (type === 'equation') {
+      setCurrentExpression('');
+      setEquationPuzzle(generateSolvableEquation(1));
+    } else if (type === 'spatial') {
+      const puzzle = generateSpatialPuzzle();
+      setSpatialPuzzle(puzzle);
+      setCurrentSpatialGrid([...puzzle.initialGrid]);
+    } else if (type === 'shape') {
+      const puzzle = generateShapePuzzle();
+      setShapePuzzle(puzzle);
+      setCurrentShape(deepClone2DArray(puzzle.initialShape));
+    } else if (type === 'number-grid') {
+      const puzzle = generateNumberGridPuzzle(1);
+      setNumberGridPuzzle(puzzle);
+      setCurrentPath([]);
+    } else if (type === 'color-logic') {
+      const puzzle = generateColorLogicPuzzle();
+      setColorLogicPuzzle(puzzle);
+      setCurrentColorGrid(deepClone2DArray(puzzle.initialGrid));
+    } else if (type === 'sequence-solver') {
+      const puzzle = generateSequenceSolverPuzzle(1);
+      setSequenceSolverPuzzle(puzzle);
+      setSequenceInput('');
+    } else if (type === 'target-sum') {
+      const puzzle = generateTargetSumPuzzle(1);
+      setTargetSumPuzzle(puzzle);
+      setSelectedNumbers([]);
+    } else if (type === 'pattern-matcher') {
+      const puzzle = generatePatternMatcherPuzzle();
+      setPatternMatcherPuzzle(puzzle);
+      setSelectedPatternOption(null);
+    } else if (type === 'path-deduction') {
+      const puzzle = generatePathDeductionPuzzle();
+      setPathDeductionPuzzle(puzzle);
+      setCurrentDeductionPath([]);
+    } else if (type === 'sudoku-mini') {
+      const puzzle = generateSudokuMiniPuzzle();
+      setSudokuMiniPuzzle(puzzle);
+      setCurrentSudokuGrid(deepClone2DArray(puzzle.initialGrid));
+    }
+    // NEW GAMES START HERE
+    else if (type === 'memory-match') {
+      const puzzle = generateMemoryPuzzle(1);
+      setMemoryPuzzle(puzzle);
+      setRevealedCards([]);
+    } else if (type === 'color-sequence') {
+      const puzzle = generateColorSequencePuzzle(1);
+      setColorSequencePuzzle(puzzle);
+      setPlayerSequenceInput([]);
+      setIsPlayingSequence(true); // Start playing sequence immediately
+      // Logic to play the sequence
+      let currentStep = 0;
+      const playInterval = setInterval(() => {
+        if (currentStep < puzzle.sequence.length) {
+          // Highlight color
+          setMessage(puzzle.sequence[currentStep]); // Temporarily show color
+          playSoundEffect('click'); // Or a distinct sound for sequence
+          currentStep++;
+        } else {
+          clearInterval(playInterval);
+          setMessage("Sekarang giliran Anda!");
+          setIsPlayingSequence(false);
+        }
+      }, 800);
+    } else if (type === 'number-sort') {
+      const puzzle = generateNumberSortPuzzle(1);
+      setNumberSortPuzzle(puzzle);
+      setCurrentSortArray([...puzzle.initialArray]);
+      setSelectedNumbers([]); // Reset selected numbers for this game
+    } else if (type === 'light-up-grid') {
+      const puzzle = generateLightUpPuzzle(1);
+      setLightUpPuzzle(puzzle);
+      setCurrentLightGrid(deepClone2DArray(puzzle.grid));
+    } else if (type === 'block-jigsaw') {
+      const puzzle = generateBlockJigsawPuzzle(1);
+      setBlockJigsawPuzzle(puzzle);
+      setCurrentJigsawGrid(deepClone2DArray(puzzle.initialGrid));
+      setSelectedNumbers([]); // Reset selected numbers for this game
+    } else if (type === 'weight-balance') {
+      const puzzle = generateWeightBalancePuzzle(1);
+      setWeightBalancePuzzle(puzzle);
+      setLeftTray([]);
+      setRightTray([]);
+    } else if (type === 'grid-sum') {
+      const puzzle = generateGridSumPuzzle(1);
+      setGridSumPuzzle(puzzle);
+      setCurrentGridSumGrid(deepClone2DArray(puzzle.initialGrid));
+    } else if (type === 'connect-the-dots') {
+      const puzzle = generateConnectDotsPuzzle(1);
+      setConnectDotsPuzzle(puzzle);
+      setConnectedLines([]);
+      setLastConnectedDot(null);
+    } else if (type === 'tile-flip') {
+      const puzzle = generateTileFlipPuzzle(1);
+      setTileFlipPuzzle(puzzle);
+      setCurrentTileFlipGrid(deepClone2DArray(puzzle.initialGrid));
+    } else if (type === 'color-fill') {
+      const puzzle = generateColorFillPuzzle(1);
+      setColorFillPuzzle(puzzle);
+      setCurrentColorFillGrid(deepClone2DArray(puzzle.initialGrid));
+    }
+  }, [
+    generateSolvableEquation, generateSpatialPuzzle, generateShapePuzzle,
+    generateNumberGridPuzzle, generateColorLogicPuzzle, generateSequenceSolverPuzzle,
+    generateTargetSumPuzzle, generatePatternMatcherPuzzle, generatePathDeductionPuzzle,
+    generateSudokuMiniPuzzle, deepClone2DArray, playSoundEffect,
+    // NEW GAMES
+    generateMemoryPuzzle, generateColorSequencePuzzle, generateNumberSortPuzzle,
+    generateLightUpPuzzle, generateBlockJigsawPuzzle, generateWeightBalancePuzzle,
+    generateGridSumPuzzle, generateConnectDotsPuzzle, generateTileFlipPuzzle,
+    generateColorFillPuzzle, setSelectedNumbers // Tambahkan setSelectedNumbers ke dependensi
+  ]);
+
+  // Handler untuk melanjutkan ke level berikutnya
+  const handleNextLevel = useCallback(() => {
+    setCurrentLevel((prev) => prev + 1);
+    setMessage('');
+    setShowSolution(false);
+    playSoundEffect('correct'); // Mainkan suara "benar"
+    setSelectedNumbers([]); // Reset selected numbers for games like Number Sort
+
+    // Buat puzzle baru berdasarkan jenis game dan level yang baru
+    if (gameType === 'equation') {
+      setCurrentExpression('');
+      setEquationPuzzle(generateSolvableEquation(currentLevel + 1));
+    } else if (gameType === 'spatial') {
+      const puzzle = generateSpatialPuzzle();
+      setSpatialPuzzle(puzzle);
+      setCurrentSpatialGrid([...puzzle.initialGrid]);
+    } else if (gameType === 'shape') {
+      const puzzle = generateShapePuzzle();
+      setShapePuzzle(puzzle);
+      setCurrentShape(deepClone2DArray(puzzle.initialShape));
+    } else if (gameType === 'number-grid') {
+      const puzzle = generateNumberGridPuzzle(currentLevel + 1);
+      setNumberGridPuzzle(puzzle);
+      setCurrentPath([]);
+    } else if (gameType === 'color-logic') {
+      const puzzle = generateColorLogicPuzzle();
+      setColorLogicPuzzle(puzzle);
+      setCurrentColorGrid(deepClone2DArray(puzzle.initialGrid));
+    } else if (gameType === 'sequence-solver') {
+      const puzzle = generateSequenceSolverPuzzle(currentLevel + 1);
+      setSequenceSolverPuzzle(puzzle);
+      setSequenceInput('');
+    } else if (gameType === 'target-sum') {
+      const puzzle = generateTargetSumPuzzle(currentLevel + 1);
+      setTargetSumPuzzle(puzzle);
+      setSelectedNumbers([]);
+    } else if (gameType === 'pattern-matcher') {
+      const puzzle = generatePatternMatcherPuzzle();
+      setPatternMatcherPuzzle(puzzle);
+      setSelectedPatternOption(null);
+    } else if (gameType === 'path-deduction') {
+      const puzzle = generatePathDeductionPuzzle();
+      setPathDeductionPuzzle(puzzle);
+      setCurrentDeductionPath([]);
+    } else if (gameType === 'sudoku-mini') {
+      const puzzle = generateSudokuMiniPuzzle();
+      setSudokuMiniPuzzle(puzzle);
+      setCurrentSudokuGrid(deepClone2DArray(puzzle.initialGrid));
+    }
+    // NEW GAMES START HERE
+    else if (gameType === 'memory-match') {
+      const puzzle = generateMemoryPuzzle(currentLevel + 1);
+      setMemoryPuzzle(puzzle);
+      setRevealedCards([]);
+    } else if (gameType === 'color-sequence') {
+      const puzzle = generateColorSequencePuzzle(currentLevel + 1);
+      setColorSequencePuzzle(puzzle);
+      setPlayerSequenceInput([]);
+      setIsPlayingSequence(true);
+      let currentStep = 0;
+      const playInterval = setInterval(() => {
+        if (currentStep < puzzle.sequence.length) {
+          setMessage(puzzle.sequence[currentStep]);
+          playSoundEffect('click');
+          currentStep++;
+        } else {
+          clearInterval(playInterval);
+          setMessage("Sekarang giliran Anda!");
+          setIsPlayingSequence(false);
+        }
+      }, 800);
+    } else if (gameType === 'number-sort') {
+      const puzzle = generateNumberSortPuzzle(currentLevel + 1);
+      setNumberSortPuzzle(puzzle);
+      setCurrentSortArray([...puzzle.initialArray]);
+      setSelectedNumbers([]); // Reset selected numbers for this game
+    } else if (gameType === 'light-up-grid') {
+      const puzzle = generateLightUpPuzzle(currentLevel + 1);
+      setLightUpPuzzle(puzzle);
+      setCurrentLightGrid(deepClone2DArray(puzzle.grid));
+    } else if (gameType === 'block-jigsaw') {
+      const puzzle = generateBlockJigsawPuzzle(currentLevel + 1);
+      setBlockJigsawPuzzle(puzzle);
+      setCurrentJigsawGrid(deepClone2DArray(puzzle.initialGrid));
+      setSelectedNumbers([]); // Reset selected numbers for this game
+    } else if (gameType === 'weight-balance') {
+      const puzzle = generateWeightBalancePuzzle(currentLevel + 1);
+      setWeightBalancePuzzle(puzzle);
+      setLeftTray([]);
+      setRightTray([]);
+    } else if (gameType === 'grid-sum') {
+      const puzzle = generateGridSumPuzzle(currentLevel + 1);
+      setGridSumPuzzle(puzzle);
+      setCurrentGridSumGrid(deepClone2DArray(puzzle.initialGrid));
+    } else if (gameType === 'connect-the-dots') {
+      const puzzle = generateConnectDotsPuzzle(currentLevel + 1);
+      setConnectDotsPuzzle(puzzle);
+      setConnectedLines([]);
+      setLastConnectedDot(null);
+    } else if (gameType === 'tile-flip') {
+      const puzzle = generateTileFlipPuzzle(currentLevel + 1);
+      setTileFlipPuzzle(puzzle);
+      setCurrentTileFlipGrid(deepClone2DArray(puzzle.initialGrid));
+    } else if (gameType === 'color-fill') {
+      const puzzle = generateColorFillPuzzle(currentLevel + 1);
+      setColorFillPuzzle(puzzle);
+      setCurrentColorFillGrid(deepClone2DArray(puzzle.initialGrid));
+    }
+  }, [
+    gameType, currentLevel, generateSolvableEquation, generateSpatialPuzzle, generateShapePuzzle,
+    generateNumberGridPuzzle, generateColorLogicPuzzle, generateSequenceSolverPuzzle,
+    generateTargetSumPuzzle, generatePatternMatcherPuzzle, generatePathDeductionPuzzle,
+    generateSudokuMiniPuzzle, deepClone2DArray, playSoundEffect,
+    // NEW GAMES
+    generateMemoryPuzzle, generateColorSequencePuzzle, generateNumberSortPuzzle,
+    generateLightUpPuzzle, generateBlockJigsawPuzzle, generateWeightBalancePuzzle,
+    generateGridSumPuzzle, generateConnectDotsPuzzle, generateTileFlipPuzzle,
+    generateColorFillPuzzle, setSelectedNumbers // Tambahkan setSelectedNumbers ke dependensi
+  ]);
+
+  // Handler untuk mereset puzzle saat ini
+  const handleResetPuzzle = useCallback(() => {
+    setMessage('');
+    setShowSolution(false);
+    playSoundEffect('reset_puzzle'); // Mainkan suara "reset"
+    setSelectedNumbers([]); // Reset selected numbers for games like Number Sort
+
+    // Buat ulang puzzle untuk level saat ini
+    if (gameType === 'equation') {
+      setCurrentExpression('');
+      setEquationPuzzle(generateSolvableEquation(currentLevel));
+    } else if (gameType === 'spatial') {
+      const puzzle = generateSpatialPuzzle();
+      setSpatialPuzzle(puzzle);
+      setCurrentSpatialGrid([...puzzle.initialGrid]);
+    } else if (gameType === 'shape') {
+      const puzzle = generateShapePuzzle();
+      setShapePuzzle(puzzle);
+      setCurrentShape(deepClone2DArray(puzzle.initialShape));
+    } else if (gameType === 'number-grid') {
+      const puzzle = generateNumberGridPuzzle(currentLevel);
+      setNumberGridPuzzle(puzzle);
+      setCurrentPath([]);
+    } else if (gameType === 'color-logic') {
+      const puzzle = generateColorLogicPuzzle();
+      setColorLogicPuzzle(puzzle);
+      setCurrentColorGrid(deepClone2DArray(puzzle.initialGrid));
+    } else if (gameType === 'sequence-solver') {
+      const puzzle = generateSequenceSolverPuzzle(currentLevel);
+      setSequenceSolverPuzzle(puzzle);
+      setSequenceInput('');
+    } else if (gameType === 'target-sum') {
+      const puzzle = generateTargetSumPuzzle(currentLevel);
+      setTargetSumPuzzle(puzzle);
+      setSelectedNumbers([]);
+    } else if (gameType === 'pattern-matcher') {
+      const puzzle = generatePatternMatcherPuzzle();
+      setPatternMatcherPuzzle(puzzle);
+      setSelectedPatternOption(null);
+    } else if (gameType === 'path-deduction') {
+      const puzzle = generatePathDeductionPuzzle();
+      setPathDeductionPuzzle(puzzle);
+      setCurrentDeductionPath([]);
+    } else if (gameType === 'sudoku-mini') {
+      const puzzle = generateSudokuMiniPuzzle();
+      setSudokuMiniPuzzle(puzzle);
+      setCurrentSudokuGrid(deepClone2DArray(puzzle.initialGrid));
+    }
+    // NEW GAMES START HERE
+    else if (gameType === 'memory-match') {
+      const puzzle = generateMemoryPuzzle(currentLevel);
+      setMemoryPuzzle(puzzle);
+      setRevealedCards([]);
+    } else if (gameType === 'color-sequence') {
+      const puzzle = generateColorSequencePuzzle(currentLevel);
+      setColorSequencePuzzle(puzzle);
+      setPlayerSequenceInput([]);
+      setIsPlayingSequence(true);
+      let currentStep = 0;
+      const playInterval = setInterval(() => {
+        if (currentStep < puzzle.sequence.length) {
+          setMessage(puzzle.sequence[currentStep]);
+          playSoundEffect('click');
+          currentStep++;
+        } else {
+          clearInterval(playInterval);
+          setMessage("Sekarang giliran Anda!");
+          setIsPlayingSequence(false);
+        }
+      }, 800);
+    } else if (gameType === 'number-sort') {
+      const puzzle = generateNumberSortPuzzle(currentLevel);
+      setNumberSortPuzzle(puzzle);
+      setCurrentSortArray([...puzzle.initialArray]);
+      setSelectedNumbers([]); // Reset selected numbers for this game
+    } else if (gameType === 'light-up-grid') {
+      const puzzle = generateLightUpPuzzle(currentLevel);
+      setLightUpPuzzle(puzzle);
+      setCurrentLightGrid(deepClone2DArray(puzzle.grid));
+    } else if (gameType === 'block-jigsaw') {
+      const puzzle = generateBlockJigsawPuzzle(currentLevel);
+      setBlockJigsawPuzzle(puzzle);
+      setCurrentJigsawGrid(deepClone2DArray(puzzle.initialGrid));
+      setSelectedNumbers([]); // Reset selected numbers for this game
+    } else if (gameType === 'weight-balance') {
+      const puzzle = generateWeightBalancePuzzle(currentLevel);
+      setWeightBalancePuzzle(puzzle);
+      setLeftTray([]);
+      setRightTray([]);
+    } else if (gameType === 'grid-sum') {
+      const puzzle = generateGridSumPuzzle(currentLevel);
+      setGridSumPuzzle(puzzle);
+      setCurrentGridSumGrid(deepClone2DArray(puzzle.initialGrid));
+    } else if (gameType === 'connect-the-dots') {
+      const puzzle = generateConnectDotsPuzzle(currentLevel);
+      setConnectDotsPuzzle(puzzle);
+      setConnectedLines([]);
+      setLastConnectedDot(null);
+    } else if (gameType === 'tile-flip') {
+      const puzzle = generateTileFlipPuzzle(currentLevel);
+      setTileFlipPuzzle(puzzle);
+      setCurrentTileFlipGrid(deepClone2DArray(puzzle.initialGrid));
+    } else if (gameType === 'color-fill') {
+      const puzzle = generateColorFillPuzzle(currentLevel);
+      setColorFillPuzzle(puzzle);
+      setCurrentColorFillGrid(deepClone2DArray(puzzle.initialGrid));
+    }
+  }, [
+    gameType, currentLevel, generateSolvableEquation, generateSpatialPuzzle, generateShapePuzzle,
+    generateNumberGridPuzzle, generateColorLogicPuzzle, generateSequenceSolverPuzzle,
+    generateTargetSumPuzzle, generatePatternMatcherPuzzle, generatePathDeductionPuzzle,
+    generateSudokuMiniPuzzle, deepClone2DArray, playSoundEffect,
+    // NEW GAMES
+    generateMemoryPuzzle, generateColorSequencePuzzle, generateNumberSortPuzzle,
+    generateLightUpPuzzle, generateBlockJigsawPuzzle, generateWeightBalancePuzzle,
+    generateGridSumPuzzle, generateConnectDotsPuzzle, generateTileFlipPuzzle,
+    generateColorFillPuzzle, setSelectedNumbers // Tambahkan setSelectedNumbers ke dependensi
+  ]);
+
+
+  // === Equation Builder Logic ===
+  // Menangani input angka atau operator ke ekspresi
+  const handleEquationInput = useCallback((value) => {
+    setCurrentExpression((prev) => prev + value);
+    playSoundEffect('click');
+  }, [playSoundEffect]);
+
+  // Menghapus ekspresi saat ini
+  const handleEquationClear = useCallback(() => {
+    setCurrentExpression('');
+    setMessage('');
+    playSoundEffect('click');
+  }, [playSoundEffect]);
+
+  // Memeriksa jawaban Equation Builder
+  const handleEquationSubmit = useCallback(() => {
+    if (!currentExpression) {
+      setMessage('Ekspresi kosong!');
+      return;
+    }
+    try {
+      const result = safeEval(currentExpression);
+      if (result === equationPuzzle.target) {
+        setMessage(`Benar! ${currentExpression} = ${equationPuzzle.target}`);
+        setScore((prev) => prev + 100);
+        setTimeout(handleNextLevel, 1500); // Lanjut ke level berikutnya setelah 1.5 detik
+      } else {
+        setMessage(`Salah. ${currentExpression} = ${result}. Target: ${equationPuzzle.target}`);
+        setScore((prev) => Math.max(0, prev - 20)); // Kurangi skor, minimal 0
+        playSoundEffect('incorrect');
+      }
+    } catch (e) {
+      setMessage(`Error: ${e.message}`);
+      playSoundEffect('error');
+    }
+  }, [currentExpression, equationPuzzle, safeEval, handleNextLevel, playSoundEffect]);
+
+  // === Spatial Arrangement Logic ===
+  // Menangani klik pada blok di grid Spatial Arrangement
+  const handleSpatialClick = useCallback((clickedIndex) => {
+    const newGrid = [...currentSpatialGrid];
+    const emptyIndex = newGrid.indexOf(null); // Cari posisi kosong
+
+    if (emptyIndex === -1) {
+      setMessage("Tidak ada tempat kosong.");
+      return;
+    }
+
+    // Hitung baris dan kolom dari indeks
+    const clickedRow = Math.floor(clickedIndex / 2);
+    const clickedCol = clickedIndex % 2;
+    const emptyRow = Math.floor(emptyIndex / 2);
+    const emptyCol = emptyIndex % 2;
+
+    // Periksa apakah blok yang diklik berdekatan dengan tempat kosong
+    const isAdjacent = (
+      (Math.abs(clickedRow - emptyRow) === 1 && clickedCol === emptyCol) || // Vertikal
+      (Math.abs(clickedCol - emptyCol) === 1 && clickedRow === emptyRow) // Horizontal
+    );
+
+    if (isAdjacent) {
+      // Tukar posisi blok yang diklik dengan tempat kosong
+      const temp = newGrid[clickedIndex];
+      newGrid[clickedIndex] = newGrid[emptyIndex];
+      newGrid[emptyIndex] = temp;
+      setCurrentSpatialGrid(newGrid);
+      playSoundEffect('click');
+      checkSpatialSolution(newGrid); // Periksa solusi setelah setiap gerakan
+    } else {
+      setMessage("Anda hanya bisa memindahkan blok ke tempat kosong yang berdekatan.");
+    }
+  }, [currentSpatialGrid, playSoundEffect]);
+
+  // Memeriksa solusi Spatial Arrangement
+  const checkSpatialSolution = useCallback((gridToCheck) => {
+    if (!spatialPuzzle) return;
+    // Filter null dari grid untuk perbandingan (karena targetGrid tidak punya null)
+    const gridToCheckWithoutNull = gridToCheck.filter(item => item !== null);
+    if (JSON.stringify(gridToCheckWithoutNull) === JSON.stringify(spatialPuzzle.targetGrid)) {
+      setMessage("Benar! Pola cocok.");
+      setScore((prev) => prev + 150);
+      setTimeout(handleNextLevel, 1500);
+    } else {
+      setMessage("Pola belum cocok.");
+    }
+  }, [spatialPuzzle, handleNextLevel]);
+
+  // === Shape Transformation Logic ===
+  // Menerapkan transformasi pada bentuk
+  const applyShapeTransform = useCallback((transformType) => {
+    let newShape = deepClone2DArray(currentShape);
+    let transformName = "";
+
+    if (transformType === 'rotate') {
+      // Rotasi 90 derajat searah jarum jam
+      newShape = newShape[0].map((val, index) => newShape.map(row => row[index]).reverse());
+      transformName = "Putar 90° Searah Jarum Jam";
+    } else if (transformType === 'flipH') {
+      // Balik Horizontal
+      newShape = newShape.map(row => [...row].reverse());
+      transformName = "Balik Horizontal";
+    } else if (transformType === 'flipV') {
+      // Balik Vertikal
+      newShape = [...newShape].reverse();
+      transformName = "Balik Vertikal";
+    }
+    setCurrentShape(newShape);
+    playSoundEffect('click');
+    setMessage(`Melakukan: ${transformName}`);
+    checkShapeSolution(newShape); // Periksa solusi setelah setiap transformasi
+  }, [currentShape, deepClone2DArray, playSoundEffect]);
+
+  // Memeriksa solusi Shape Transformation
+  const checkShapeSolution = useCallback((shapeToCheck) => {
+    if (!shapePuzzle) return;
+    if (JSON.stringify(shapeToCheck) === JSON.stringify(shapePuzzle.targetShape)) {
+      setMessage("Benar! Bentuk cocok.");
+      setScore((prev) => prev + 200);
+      setTimeout(handleNextLevel, 1500);
+    } else {
+      setMessage("Bentuk belum cocok.");
+    }
+  }, [shapePuzzle, handleNextLevel]);
+
+  // === Number Grid Flow Logic ===
+  // Menangani klik pada sel di grid Number Grid Flow
+  const handleNumberGridClick = useCallback((row, col, value) => {
+    const lastPoint = currentPath[currentPath.length - 1];
+    if (currentPath.length === 0) {
+      // Jika ini klik pertama, harus dimulai dari titik START
+      if (row === numberGridPuzzle.start.row && col === numberGridPuzzle.start.col) {
+        setCurrentPath([{ row, col, value }]);
+        setMessage("Path dimulai!");
+      } else {
+        setMessage("Anda harus mulai dari titik START.");
+      }
+    } else {
+      // Jika melanjutkan path, harus berdekatan dan mengikuti aturan
+      const isAdjacent = (
+        (Math.abs(row - lastPoint.row) === 1 && col === lastPoint.col) ||
+        (Math.abs(col - lastPoint.col) === 1 && row === lastPoint.row)
+      );
+
+      if (isAdjacent) {
+        // Hitung nilai yang diharapkan berdasarkan aturan
+        const expectedValue = numberGridPuzzle.rule === '+'
+          ? lastPoint.value + numberGridPuzzle.ruleValue
+          : lastPoint.value - numberGridPuzzle.ruleValue;
+
+        if (value === expectedValue) {
+          const newPath = [...currentPath, { row, col, value }];
+          setCurrentPath(newPath);
+          // Jika mencapai titik END, puzzle selesai
+          if (row === numberGridPuzzle.end.row && col === numberGridPuzzle.end.col) {
+            setMessage("Benar! Path selesai.");
+            setScore(prev => prev + 250);
+            setTimeout(handleNextLevel, 1500);
+          } else {
+            setMessage("Lanjutkan path...");
+          }
+        } else {
+          setMessage(`Salah! Angka berikutnya harus ${expectedValue}.`);
+        }
+      } else {
+        setMessage("Anda hanya bisa bergerak ke sel yang berdekatan.");
+      }
+    }
+    playSoundEffect('click');
+  }, [currentPath, numberGridPuzzle, handleNextLevel, playSoundEffect]);
+
+  // Menghapus jalur yang sedang dibuat di Number Grid Flow
+  const handleNumberGridClearPath = useCallback(() => {
+    setCurrentPath([]);
+    setMessage("Path dihapus.");
+    playSoundEffect('reset_puzzle');
+  }, [playSoundEffect]);
+
+  // === Color Logic Bridge Logic ===
+  const colorOptions = ['bg-red-300', 'bg-blue-300', 'bg-green-300', 'bg-yellow-300'];
+  // Menangani klik pada sel di grid Color Logic Bridge
+  const handleColorGridClick = useCallback((row, col) => {
+    const newGrid = deepClone2DArray(currentColorGrid);
+    // Hanya izinkan perubahan pada sel yang awalnya kosong (null)
+    if (colorLogicPuzzle.initialGrid[row][col] === null) {
+      const currentColorIndex = colorOptions.indexOf(newGrid[row][col]);
+      const nextColorIndex = (currentColorIndex + 1) % colorOptions.length;
+      newGrid[row][col] = colorOptions[nextColorIndex]; // Ganti ke warna berikutnya
+      setCurrentColorGrid(newGrid);
+      setMessage("Warna diubah.");
+      checkColorLogicSolution(newGrid); // Periksa solusi setelah setiap perubahan
+    } else {
+      setMessage("Sel ini tidak bisa diubah karena sudah terisi awal.");
+    }
+    playSoundEffect('click');
+  }, [currentColorGrid, colorLogicPuzzle, deepClone2DArray, playSoundEffect]);
+
+  // Memeriksa solusi Color Logic Bridge
+  const checkColorLogicSolution = useCallback((gridToCheck) => {
+    if (!colorLogicPuzzle) return;
+    if (JSON.stringify(gridToCheck) === JSON.stringify(colorLogicPuzzle.solutionGrid)) {
+        setMessage("Benar! Grid warna cocok.");
+        setScore(prev => prev + 300);
+        setTimeout(handleNextLevel, 1500);
+    } else {
+        setMessage("Grid warna belum benar. Periksa kembali aturan.");
+    }
+  }, [colorLogicPuzzle, handleNextLevel]);
+
+  // === Sequence Solver Logic ===
+  // Menangani perubahan input untuk jawaban Sequence Solver
+  const handleSequenceInputChange = useCallback((e) => {
+    setSequenceInput(e.target.value);
+  }, []);
+
+  // Memeriksa jawaban Sequence Solver
+  const handleSequenceSubmit = useCallback(() => {
+    // Gunakan parseInt untuk membandingkan angka
+    if (parseInt(sequenceInput) === sequencePuzzle.nextNumber) {
+      setMessage("Benar! Angka berikutnya tepat.");
+      setScore(prev => prev + 100);
+      setTimeout(handleNextLevel, 1500);
+    } else {
+      setMessage("Salah. Coba lagi.");
+      setScore(prev => Math.max(0, prev - 10));
+      playSoundEffect('incorrect');
+    }
+  }, [sequenceInput, sequencePuzzle, handleNextLevel, playSoundEffect]);
+
+  // === Target Sum Logic ===
+  // Menangani klik pada angka di Target Sum
+  const handleTargetSumClick = useCallback((number) => {
+    const newSelectedNumbers = selectedNumbers.includes(number)
+      ? selectedNumbers.filter(n => n !== number) // Hapus jika sudah terpilih
+      : [...selectedNumbers, number]; // Tambahkan jika belum terpilih
+    setSelectedNumbers(newSelectedNumbers);
+    playSoundEffect('click');
+
+    const currentSum = newSelectedNumbers.reduce((sum, num) => sum + num, 0);
+    if (currentSum === targetSumPuzzle.targetSum) {
+      setMessage("Benar! Jumlah target tercapai.");
+      setScore(prev => prev + 150);
+      setTimeout(handleNextLevel, 1500);
+    } else {
+      setMessage(`Jumlah saat ini: ${currentSum}. Target: ${targetSumPuzzle.targetSum}`);
+    }
+  }, [selectedNumbers, targetSumPuzzle, handleNextLevel, playSoundEffect]);
+
+  // === Pattern Matcher Logic ===
+  // Menangani pemilihan opsi pola di Pattern Matcher
+  const handlePatternSelect = useCallback((index) => {
+    setSelectedPatternOption(index);
+    playSoundEffect('click');
+    if (index === patternMatcherPuzzle.correctOptionIndex) {
+      setMessage("Benar! Pola berikutnya tepat.");
+      setScore(prev => prev + 120);
+      setTimeout(handleNextLevel, 1500);
+    } else {
+      setMessage("Salah. Coba lagi.");
+      setScore(prev => Math.max(0, prev - 15));
+      playSoundEffect('incorrect');
+    }
+  }, [patternMatcherPuzzle, handleNextLevel, playSoundEffect]);
+
+  // === Path Deduction Logic ===
+  // Menangani klik pada sel di grid Path Deduction
+  const handlePathDeductionClick = useCallback((row, col) => {
+    const lastPoint = currentDeductionPath[currentDeductionPath.length - 1];
+
+    if (currentDeductionPath.length === 0) {
+      // Jika ini klik pertama, harus dimulai dari titik START
+      if (row === pathDeductionPuzzle.start.row && col === pathDeductionPuzzle.start.col) {
+        setCurrentDeductionPath([{ row, col }]);
+        setMessage("Jalur dimulai!");
+      } else {
+        setMessage("Anda harus mulai dari titik START.");
+      }
+    } else {
+      // Periksa apakah sel yang diklik berdekatan (termasuk diagonal)
+      const isAdjacent = (Math.abs(row - lastPoint.row) <= 1 && Math.abs(col - lastPoint.col) <= 1) &&
+                           !(row === lastPoint.row && col === lastPoint.col); // Tidak boleh sel yang sama
+
+      if (!isAdjacent) {
+        setMessage("Anda hanya bisa bergerak ke sel yang berdekatan.");
+        return;
+      }
+
+      // Periksa apakah gerakan sesuai dengan aturan jalur
+      let validMove = false;
+      const dRow = Math.abs(row - lastPoint.row);
+      const dCol = Math.abs(col - lastPoint.col);
+
+      if (pathDeductionPuzzle.rules.includes("Hanya boleh bergerak secara horizontal atau vertikal (atas, bawah, kiri, kanan).")) {
+        if ((dRow === 1 && dCol === 0) || (dRow === 0 && dCol === 1)) {
+          validMove = true;
+        }
+      } else if (pathDeductionPuzzle.rules.includes("Hanya boleh bergerak secara diagonal.")) {
+        if (dRow === 1 && dCol === 1) {
+          validMove = true;
+        }
+      } else { // Fallback: jika tidak ada aturan spesifik, anggap semua gerakan berdekatan valid
+          validMove = true;
+      }
+
+      if (validMove) {
+        const newPath = [...currentDeductionPath, { row, col }];
+        setCurrentDeductionPath(newPath);
+        // Jika mencapai titik END, puzzle selesai
+        if (row === pathDeductionPuzzle.end.row && col === pathDeductionPuzzle.end.col) {
+          setMessage("Benar! Jalur selesai.");
+          setScore(prev => prev + 180);
+          setTimeout(handleNextLevel, 1500);
+        } else {
+          setMessage("Lanjutkan jalur...");
+        }
+      } else {
+        setMessage("Gerakan tidak sesuai dengan aturan jalur!");
+      }
+    }
+    playSoundEffect('click');
+  }, [currentDeductionPath, pathDeductionPuzzle, handleNextLevel, playSoundEffect]);
+
+  // Menghapus jalur yang sedang dibuat di Path Deduction
+  const handlePathDeductionClear = useCallback(() => {
+    setCurrentDeductionPath([]);
+    setMessage("Jalur dihapus.");
+    playSoundEffect('reset_puzzle');
+  }, [playSoundEffect]);
+
+  // === Sudoku Mini Logic ===
+  // Menangani input angka pada sel Sudoku Mini
+  const handleSudokuMiniInput = useCallback((row, col, value) => {
+    const newGrid = deepClone2DArray(currentSudokuGrid);
+    // Hanya izinkan perubahan pada sel yang awalnya kosong (null)
+    if (sudokuMiniPuzzle.initialGrid[row][col] === null) {
+      newGrid[row][col] = value === '' ? null : parseInt(value); // Simpan sebagai null jika kosong, atau integer
+      setCurrentSudokuGrid(newGrid);
+      setMessage(""); // Hapus pesan saat input
+      // Periksa solusi setelah setiap input (untuk kesederhanaan)
+      checkSudokuMiniSolution(newGrid);
+    } else {
+      setMessage("Sel ini sudah terisi dan tidak bisa diubah.");
+    }
+    playSoundEffect('click');
+  }, [currentSudokuGrid, sudokuMiniPuzzle, deepClone2DArray, playSoundEffect]);
+
+  // Memeriksa solusi Sudoku Mini
+  const checkSudokuMiniSolution = useCallback((gridToCheck) => {
+    if (!sudokuMiniPuzzle) return;
+
+    // Ubah null menjadi 0 untuk perbandingan (jika solutionGrid juga menggunakan 0)
+    // Atau pastikan kedua grid menggunakan null atau 0 secara konsisten.
+    // Di sini, kita asumsikan solutionGrid berisi angka atau 0, dan gridToCheck mungkin null.
+    const cleanGrid = gridToCheck.map(row => row.map(cell => cell === null ? 0 : cell));
+    const cleanSolution = sudokuMiniPuzzle.solutionGrid.map(row => row.map(cell => cell === null ? 0 : cell));
+
+    if (JSON.stringify(cleanGrid) === JSON.stringify(cleanSolution)) {
+      setMessage("Benar! Sudoku terpecahkan.");
+      setScore(prev => prev + 250);
+      setTimeout(handleNextLevel, 1500);
+    } else {
+      setMessage("Sudoku belum benar. Periksa baris, kolom, dan blok.");
+    }
+  }, [sudokuMiniPuzzle, handleNextLevel]);
+
+  // NEW GAME LOGIC HANDLERS
+  // Memory Match Logic
+  const handleCardClick = useCallback((clickedIndex) => {
+    if (revealedCards.length === 2 || memoryPuzzle.cards[clickedIndex].isMatched || revealedCards.includes(clickedIndex)) {
+      return; // Jangan lakukan apa-apa jika 2 kartu sudah terbuka atau kartu sudah cocok/terbuka
+    }
+
+    playSoundEffect('click');
+    const newCards = [...memoryPuzzle.cards];
+    newCards[clickedIndex].isRevealed = true;
+    setMemoryPuzzle(prev => ({ ...prev, cards: newCards })); // Gunakan prev state untuk update
+
+    const newRevealedCards = [...revealedCards, clickedIndex];
+    setRevealedCards(newRevealedCards);
+
+    if (newRevealedCards.length === 2) {
+      const [idx1, idx2] = newRevealedCards;
+      if (newCards[idx1].value === newCards[idx2].value) {
+        // Match found
+        newCards[idx1].isMatched = true;
+        newCards[idx2].isMatched = true;
+        setMemoryPuzzle(prev => ({ ...prev, cards: newCards, pairsFound: prev.pairsFound + 1 }));
+        setRevealedCards([]);
+        setMessage("Cocok!");
+        playSoundEffect('correct');
+        if (memoryPuzzle.pairsFound + 1 === memoryPuzzle.totalPairs) {
+          setMessage("Semua pasangan ditemukan! Anda menang!");
+          setScore(prev => prev + 200);
+          setTimeout(handleNextLevel, 1500);
+        }
+      } else {
+        // No match, flip back after a delay
+        setMessage("Tidak cocok. Coba lagi.");
+        playSoundEffect('incorrect');
+        setTimeout(() => {
+          const resetCards = [...memoryPuzzle.cards];
+          resetCards[idx1].isRevealed = false;
+          resetCards[idx2].isRevealed = false;
+          setMemoryPuzzle(prev => ({ ...prev, cards: resetCards })); // Gunakan prev state untuk update
+          setRevealedCards([]);
+          setMessage('');
+        }, 1000);
+        setScore(prev => Math.max(0, prev - 10));
+      }
+    }
+  }, [memoryPuzzle, revealedCards, playSoundEffect, handleNextLevel]);
+
+  // Color Sequence Logic
+  const handleColorSequenceClick = useCallback((color) => {
+    if (isPlayingSequence) return; // Jangan izinkan input saat sequence sedang dimainkan
+
+    playSoundEffect('click');
+    const newPlayerInput = [...playerSequenceInput, color];
+    setPlayerSequenceInput(newPlayerInput);
+
+    // Cek apakah input sesuai dengan langkah saat ini di sequence
+    if (newPlayerInput[newPlayerInput.length - 1] !== colorSequencePuzzle.sequence[newPlayerInput.length - 1]) {
+      setMessage("Salah! Urutan tidak benar.");
+      setScore(prev => Math.max(0, prev - 20));
+      playSoundEffect('incorrect');
+      setTimeout(() => {
+        setPlayerSequenceInput([]);
+        setMessage("Coba lagi!");
+        // Restart sequence playback
+        setIsPlayingSequence(true);
+        let currentStep = 0;
+        const playInterval = setInterval(() => {
+          if (currentStep < colorSequencePuzzle.sequence.length) {
+            setMessage(colorSequencePuzzle.sequence[currentStep]);
+            playSoundEffect('click');
+            currentStep++;
+          } else {
+            clearInterval(playInterval);
+            setMessage("Sekarang giliran Anda!");
+            setIsPlayingSequence(false);
+          }
+        }, 800);
+      }, 1000);
+      return;
+    }
+
+    // Jika input benar dan sequence selesai
+    if (newPlayerInput.length === colorSequencePuzzle.sequence.length) {
+      setMessage("Benar! Urutan cocok.");
+      setScore(prev => prev + 150);
+      setTimeout(handleNextLevel, 1500);
+    } else {
+      setMessage("Lanjutkan urutan...");
+    }
+  }, [isPlayingSequence, playerSequenceInput, colorSequencePuzzle, playSoundEffect, handleNextLevel]);
+
+  // Number Sort Logic
+  const handleNumberSwap = useCallback((index1, index2) => {
+    const newArray = [...currentSortArray];
+    [newArray[index1], newArray[index2]] = [newArray[index2], newArray[index1]]; // Swap elements
+    setCurrentSortArray(newArray);
+    playSoundEffect('click');
+    checkNumberSortSolution(newArray);
+  }, [currentSortArray, playSoundEffect]);
+
+  const checkNumberSortSolution = useCallback((arrayToCheck) => {
+    if (!numberSortPuzzle) return;
+    if (JSON.stringify(arrayToCheck) === JSON.stringify(numberSortPuzzle.sortedArray)) {
+      setMessage("Benar! Angka diurutkan dengan benar.");
+      setScore(prev => prev + 100);
+      setTimeout(handleNextLevel, 1500);
+    } else {
+      setMessage("Angka belum diurutkan dengan benar.");
+    }
+  }, [numberSortPuzzle, handleNextLevel]);
+
+  // Light Up Grid Logic
+  const handleLightClick = useCallback((row, col) => {
+    const newGrid = deepClone2DArray(currentLightGrid);
+    const size = lightUpPuzzle.size;
+
+    // Toggle clicked cell and its neighbors
+    newGrid[row][col] = !newGrid[row][col];
+    if (row > 0) newGrid[row - 1][col] = !newGrid[row - 1][col];
+    if (row < size - 1) newGrid[row + 1][col] = !newGrid[row + 1][col];
+    if (col > 0) newGrid[row][col - 1] = !newGrid[row][col - 1];
+    if (col < size - 1) newGrid[row][col + 1] = !newGrid[row][col + 1];
+
+    setCurrentLightGrid(newGrid);
+    playSoundEffect('click');
+    checkLightUpSolution(newGrid);
+  }, [currentLightGrid, lightUpPuzzle, deepClone2DArray, playSoundEffect]);
+
+  const checkLightUpSolution = useCallback((gridToCheck) => {
+    if (!lightUpPuzzle) return;
+    const allLit = gridToCheck.every(row => row.every(cell => cell === true));
+    if (allLit) {
+      setMessage("Benar! Semua sel menyala.");
+      setScore(prev => prev + 250);
+      setTimeout(handleNextLevel, 1500);
+    } else {
+      setMessage("Belum semua sel menyala.");
+    }
+  }, [lightUpPuzzle, handleNextLevel]);
+
+  // Block Jigsaw Logic
+  const handleBlockSwap = useCallback((index1, index2) => {
+    const newGrid = deepClone2DArray(currentJigsawGrid);
+    const gridSize = blockJigsawPuzzle.gridSize;
+
+    // Convert 1D index to 2D coordinates
+    const r1 = Math.floor(index1 / gridSize);
+    const c1 = index1 % gridSize;
+    const r2 = Math.floor(index2 / gridSize);
+    const c2 = index2 % gridSize;
+
+    // Swap elements in the 2D array
+    const temp = newGrid[r1][c1];
+    newGrid[r1][c1] = newGrid[r2][c2];
+    newGrid[r2][c2] = temp;
+
+    setCurrentJigsawGrid(newGrid);
+    playSoundEffect('click');
+    checkBlockJigsawSolution(newGrid);
+  }, [currentJigsawGrid, blockJigsawPuzzle, deepClone2DArray, playSoundEffect]);
+
+  const checkBlockJigsawSolution = useCallback((gridToCheck) => {
+    if (!blockJigsawPuzzle) return;
+    if (JSON.stringify(gridToCheck) === JSON.stringify(blockJigsawPuzzle.targetGrid)) {
+      setMessage("Benar! Jigsaw cocok.");
+      setScore(prev => prev + 200);
+      setTimeout(handleNextLevel, 1500);
+    } else {
+      setMessage("Jigsaw belum cocok.");
+    }
+  }, [blockJigsawPuzzle, handleNextLevel]);
+
+  // Weight Balance Logic
+  const handleWeightPlacement = useCallback((weight, trayType) => {
+    playSoundEffect('click');
+    if (trayType === 'left') {
+      setLeftTray(prev => [...prev, weight]);
+    } else {
+      setRightTray(prev => [...prev, weight]);
+    }
+    // Note: Untuk game yang lebih kompleks, Anda mungkin ingin menghapus berat dari daftar yang tersedia
+    // setelah ditempatkan, atau memiliki mekanisme untuk memindahkan berat antar nampan.
+  }, [playSoundEffect]);
+
+  const checkBalance = useCallback(() => {
+    if (!weightBalancePuzzle) return;
+    const sumLeft = leftTray.reduce((sum, w) => sum + w, 0);
+    const sumRight = rightTray.reduce((sum, w) => sum + w, 0);
+
+    if (sumLeft === weightBalancePuzzle.targetBalance && sumRight === weightBalancePuzzle.targetBalance) {
+      setMessage("Benar! Timbangan seimbang.");
+      setScore(prev => prev + 250);
+      setTimeout(handleNextLevel, 1500);
+    } else {
+      setMessage(`Kiri: ${sumLeft}, Kanan: ${sumRight}. Target: ${weightBalancePuzzle.targetBalance}. Belum seimbang.`);
+      setScore(prev => Math.max(0, prev - 15));
+      playSoundEffect('incorrect');
+    }
+  }, [leftTray, rightTray, weightBalancePuzzle, handleNextLevel, playSoundEffect]);
+
+  // Grid Sum Logic
+  const handleGridSumInput = useCallback((rIdx, cIdx, value) => {
+    const newGrid = deepClone2DArray(currentGridSumGrid);
+    if (gridSumPuzzle.initialGrid[rIdx][cIdx] === null) {
+      newGrid[rIdx][cIdx] = value === '' ? null : parseInt(value);
+      setCurrentGridSumGrid(newGrid);
+      setMessage(""); // Clear message on input
+      // checkGridSumSolution(newGrid); // Could check here, but better on submit
+    } else {
+      setMessage("Sel ini tidak bisa diubah.");
+    }
+    playSoundEffect('click');
+  }, [currentGridSumGrid, gridSumPuzzle, deepClone2DArray, playSoundEffect]);
+
+  const checkGridSumSolution = useCallback(() => {
+    if (!gridSumPuzzle) return;
+    // Check if all cells are filled
+    const allFilled = currentGridSumGrid.flat().every(cell => cell !== null && !isNaN(cell));
+    if (!allFilled) {
+      setMessage("Isi semua sel yang kosong.");
+      return;
+    }
+
+    let correct = true;
+    // Check row sums
+    for (let r = 0; r < gridSumPuzzle.size; r++) {
+      const rowSum = currentGridSumGrid[r].reduce((sum, val) => sum + val, 0);
+      if (rowSum !== gridSumPuzzle.rowSums[r]) {
+        correct = false;
+        break;
+      }
+    }
+    // Check column sums
+    if (correct) {
+      for (let c = 0; c < gridSumPuzzle.size; c++) {
+        const colSum = currentGridSumGrid.reduce((sum, row) => sum + row[c], 0);
+        if (colSum !== gridSumPuzzle.colSums[c]) {
+          correct = false;
+          break;
+        }
+      }
+    }
+
+    if (correct) {
+      setMessage("Benar! Semua jumlah grid cocok.");
+      setScore(prev => prev + 200);
+      setTimeout(handleNextLevel, 1500);
+    } else {
+      setMessage("Jumlah grid belum benar. Periksa kembali.");
+      setScore(prev => Math.max(0, prev - 20));
+      playSoundEffect('incorrect');
+    }
+  }, [currentGridSumGrid, gridSumPuzzle, handleNextLevel, playSoundEffect]);
+
+  // Connect the Dots Logic
+  const handleDotClick = useCallback((clickedDot) => {
+    playSoundEffect('click');
+    if (lastConnectedDot === null) {
+      // First dot clicked, must be dot 1
+      if (clickedDot.order === 1) {
+        setLastConnectedDot(clickedDot);
+        setMessage("Mulai menghubungkan titik.");
+      } else {
+        setMessage("Anda harus mulai dari titik nomor 1.");
+      }
+    } else {
+      // Subsequent dots, must be the next in sequence
+      if (clickedDot.order === lastConnectedDot.order + 1) {
+        setConnectedLines(prev => [...prev, { fromDot: lastConnectedDot, toDot: clickedDot }]);
+        setLastConnectedDot(clickedDot);
+        if (clickedDot.order === connectDotsPuzzle.dots.length) {
+          setMessage("Benar! Semua titik terhubung.");
+          setScore(prev => prev + 180);
+          setTimeout(handleNextLevel, 1500);
+        } else {
+          setMessage("Lanjutkan menghubungkan titik.");
+        }
+      } else {
+        setMessage("Anda harus menghubungkan titik secara berurutan.");
+        setScore(prev => Math.max(0, prev - 10));
+        playSoundEffect('incorrect');
+      }
+    }
+  }, [lastConnectedDot, connectDotsPuzzle, handleNextLevel, playSoundEffect]);
+
+  const handleConnectDotsClear = useCallback(() => {
+    setConnectedLines([]);
+    setLastConnectedDot(null);
+    setMessage("Garis dihapus.");
+    playSoundEffect('reset_puzzle');
+  }, [playSoundEffect]);
+
+  // Tile Flip Logic
+  const handleTileFlip = useCallback((r, c) => {
+    const newGrid = deepClone2DArray(currentTileFlipGrid);
+    const size = tileFlipPuzzle.size;
+
+    // Toggle clicked cell and its neighbors
+    newGrid[r][c] = !newGrid[r][c];
+    if (r > 0) newGrid[r - 1][c] = !newGrid[r - 1][c];
+    if (r < size - 1) newGrid[r + 1][c] = !newGrid[r + 1][c];
+    if (c > 0) newGrid[r][c - 1] = !newGrid[r][c - 1];
+    if (c < size - 1) newGrid[r][c + 1] = !newGrid[r][c + 1];
+
+    setCurrentTileFlipGrid(newGrid);
+    playSoundEffect('click');
+    checkTileFlipSolution(newGrid);
+  }, [currentTileFlipGrid, tileFlipPuzzle, deepClone2DArray, playSoundEffect]);
+
+  const checkTileFlipSolution = useCallback((gridToCheck) => {
+    if (!tileFlipPuzzle) return;
+    if (JSON.stringify(gridToCheck) === JSON.stringify(tileFlipPuzzle.targetGrid)) {
+      setMessage("Benar! Semua ubin cocok.");
+      setScore(prev => prev + 200);
+      setTimeout(handleNextLevel, 1500);
+    } else {
+      setMessage("Belum semua ubin cocok.");
+    }
+  }, [tileFlipPuzzle, handleNextLevel]);
+
+  // Color Fill Logic (Flood Fill)
+  const handleColorFillStart = useCallback((r, c) => {
+    if (!colorFillPuzzle) return;
+
+    const initialColor = currentColorFillGrid[r][c];
+    if (initialColor === colorFillPuzzle.targetColor) {
+      setMessage("Sel ini sudah warna target.");
+      return;
+    }
+
+    const newGrid = deepClone2DArray(currentColorFillGrid);
+    const size = colorFillPuzzle.size;
+
+    const queue = [{ r, c }];
+    const visited = new Set();
+    visited.add(`${r},${c}`);
+
+    while (queue.length > 0) {
+      const { r: currR, c: currC } = queue.shift();
+
+      if (newGrid[currR][currC] === initialColor) {
+        newGrid[currR][currC] = colorFillPuzzle.targetColor; // Change color
+
+        const neighbors = [
+          { r: currR - 1, c: currC }, // Up
+          { r: currR + 1, c: currC }, // Down
+          { r: currR, c: currC - 1 }, // Left
+          { r: currR, c: currC + 1 }, // Right
+        ];
+
+        for (const neighbor of neighbors) {
+          if (
+            neighbor.r >= 0 && neighbor.r < size &&
+            neighbor.c >= 0 && neighbor.c < size &&
+            newGrid[neighbor.r][neighbor.c] === initialColor &&
+            !visited.has(`${neighbor.r},${neighbor.c}`)
+          ) {
+            visited.add(`${neighbor.r},${neighbor.c}`);
+            queue.push(neighbor);
+          }
+        }
+      }
+    }
+    setCurrentColorFillGrid(newGrid);
+    playSoundEffect('click');
+    checkColorFillSolution(newGrid);
+  }, [currentColorFillGrid, colorFillPuzzle, deepClone2DArray, playSoundEffect]);
+
+  const checkColorFillSolution = useCallback((gridToCheck) => {
+    if (!colorFillPuzzle) return;
+    const allTargetColor = gridToCheck.every(row => row.every(cell => cell === colorFillPuzzle.targetColor));
+    if (allTargetColor) {
+      setMessage("Benar! Seluruh grid terisi warna target.");
+      setScore(prev => prev + 250);
+      setTimeout(handleNextLevel, 1500);
+    } else {
+      setMessage("Belum semua sel terisi warna target.");
+    }
+  }, [colorFillPuzzle, handleNextLevel]);
+
+
+  // === Render UI ===
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex flex-col items-center justify-center p-4 font-inter text-gray-800">
+      <div className="w-full max-w-4xl bg-white rounded-xl shadow-lg p-6 md:p-8">
+        {/* Header Aplikasi */}
+        <h1 className="text-4xl md:text-5xl font-extrabold text-center text-indigo-700 mb-6">
+          MindFlow
+        </h1>
+        <p className="text-lg text-center text-gray-600 mb-8">
+          Petualangan Logika dan Angka
+        </p>
+
+        {/* Tampilan ID Pengguna (untuk identifikasi dalam aplikasi multi-pengguna) */}
+        {isAuthReady && userId && (
+          <div className="text-sm text-center text-gray-500 mb-4 p-2 bg-gray-50 rounded-lg">
+            ID Pengguna: <span className="font-mono text-xs break-all">{userId}</span>
+          </div>
+        )}
+
+        {/* Layar Beranda */}
+        {currentScreen === 'home' && (
+          <div className="text-center">
+            <p className="text-md md:text-lg mb-8">
+              Pilih jenis teka-teki yang ingin Anda pecahkan:
+            </p>
+
+            {/* Kategori: Matematika & Angka */}
+            <h2 className="text-2xl font-bold text-indigo-700 mt-8 mb-4">Matematika & Angka</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+              <button
+                onClick={() => handleStartGame('equation')}
+                className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-full shadow-lg transform transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-opacity-50"
+              >
+                Equation Builder
+              </button>
+              <button
+                onClick={() => handleStartGame('number-grid')}
+                className="bg-pink-600 hover:bg-pink-700 text-white font-bold py-3 px-6 rounded-full shadow-lg transform transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-pink-500 focus:ring-opacity-50"
+              >
+                Number Grid Flow
+              </button>
+              <button
+                onClick={() => handleStartGame('sequence-solver')}
+                className="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-full shadow-lg transform transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-opacity-50"
+              >
+                Sequence Solver
+              </button>
+              <button
+                onClick={() => handleStartGame('target-sum')}
+                className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-full shadow-lg transform transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50"
+              >
+                Target Sum
+              </button>
+              <button
+                onClick={() => handleStartGame('number-sort')}
+                className="bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-6 rounded-full shadow-lg transform transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-opacity-50"
+              >
+                Urutan Angka
+              </button>
+              <button
+                onClick={() => handleStartGame('weight-balance')}
+                className="bg-orange-600 hover:bg-orange-700 text-white font-bold py-3 px-6 rounded-full shadow-lg transform transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-500 focus:ring-opacity-50"
+              >
+                Keseimbangan Berat
+              </button>
+               <button
+                onClick={() => handleStartGame('grid-sum')}
+                className="bg-teal-600 hover:bg-teal-700 text-white font-bold py-3 px-6 rounded-full shadow-lg transform transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-teal-500 focus:ring-opacity-50"
+              >
+                Jumlah Grid
+              </button>
+            </div>
+
+            {/* Kategori: Logika Visual & Spasial */}
+            <h2 className="text-2xl font-bold text-purple-700 mt-8 mb-4">Logika Visual & Spasial</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+              <button
+                onClick={() => handleStartGame('spatial')}
+                className="bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-6 rounded-full shadow-lg transform transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-opacity-50"
+              >
+                Susunan Spasial
+              </button>
+              <button
+                onClick={() => handleStartGame('shape')}
+                className="bg-teal-600 hover:bg-teal-700 text-white font-bold py-3 px-6 rounded-full shadow-lg transform transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-teal-500 focus:ring-opacity-50"
+              >
+                Transformasi Bentuk
+              </button>
+              <button
+                onClick={() => handleStartGame('pattern-matcher')}
+                className="bg-yellow-600 hover:bg-yellow-700 text-white font-bold py-3 px-6 rounded-full shadow-lg transform transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:ring-opacity-50"
+              >
+                Pattern Matcher
+              </button>
+              <button
+                onClick={() => handleStartGame('path-deduction')}
+                className="bg-cyan-600 hover:bg-cyan-700 text-white font-bold py-3 px-6 rounded-full shadow-lg transform transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-opacity-50"
+              >
+                Path Deduction
+              </button>
+              <button
+                onClick={() => handleStartGame('light-up-grid')}
+                className="bg-indigo-400 hover:bg-indigo-500 text-white font-bold py-3 px-6 rounded-full shadow-lg transform transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-indigo-300 focus:ring-opacity-50"
+              >
+                Grid Penerangan
+              </button>
+              <button
+                onClick={() => handleStartGame('block-jigsaw')}
+                className="bg-pink-400 hover:bg-pink-500 text-white font-bold py-3 px-6 rounded-full shadow-lg transform transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-pink-300 focus:ring-opacity-50"
+              >
+                Jigsaw Blok
+              </button>
+              <button
+                onClick={() => handleStartGame('connect-the-dots')}
+                className="bg-green-400 hover:bg-green-500 text-white font-bold py-3 px-6 rounded-full shadow-lg transform transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-green-300 focus:ring-opacity-50"
+              >
+                Hubungkan Titik
+              </button>
+              <button
+                onClick={() => handleStartGame('tile-flip')}
+                className="bg-blue-400 hover:bg-blue-500 text-white font-bold py-3 px-6 rounded-full shadow-lg transform transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:ring-opacity-50"
+              >
+                Balik Ubin
+              </button>
+            </div>
+
+            {/* Kategori: Logika Murni & Memori */}
+            <h2 className="text-2xl font-bold text-orange-700 mt-8 mb-4">Logika Murni & Memori</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+              <button
+                onClick={() => handleStartGame('color-logic')}
+                className="bg-orange-600 hover:bg-orange-700 text-white font-bold py-3 px-6 rounded-full shadow-lg transform transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-500 focus:ring-opacity-50"
+              >
+                Color Logic Bridge
+              </button>
+              <button
+                onClick={() => handleStartGame('sudoku-mini')}
+                className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-full shadow-lg transform transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50"
+              >
+                Sudoku Mini (3x3)
+              </button>
+              <button
+                onClick={() => handleStartGame('memory-match')}
+                className="bg-purple-400 hover:bg-purple-500 text-white font-bold py-3 px-6 rounded-full shadow-lg transform transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-purple-300 focus:ring-opacity-50"
+              >
+                Pencocokan Memori
+              </button>
+              <button
+                onClick={() => handleStartGame('color-sequence')}
+                className="bg-yellow-400 hover:bg-yellow-500 text-white font-bold py-3 px-6 rounded-full shadow-lg transform transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-yellow-300 focus:ring-opacity-50"
+              >
+                Urutan Warna
+              </button>
+              <button
+                onClick={() => handleStartGame('color-fill')}
+                className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-3 px-6 rounded-full shadow-lg transform transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-300 focus:ring-opacity-50"
+              >
+                Isi Warna
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Layar Game */}
+        {currentScreen === 'game' && (
+          <div className="text-center">
+            <div className="flex justify-between items-center mb-6">
+              <span className="text-xl font-semibold text-indigo-600">Level: {currentLevel}</span>
+              <span className="text-xl font-semibold text-green-600">Skor: {score}</span>
+            </div>
+
+            {/* Area Pesan Umum */}
+            {message && (
+              <p className={`text-lg font-semibold mb-4 ${message.includes('Benar') || message.includes('Cocok') ? 'text-green-600' : 'text-red-600'}`}>
+                {message}
+              </p>
+            )}
+
+            {/* --- UI Spesifik untuk Setiap Jenis Game --- */}
+
+            {/* Equation Builder UI */}
+            {gameType === 'equation' && equationPuzzle && (
+              <>
+                <h2 className="text-2xl font-bold text-indigo-700 mb-4">Equation Builder</h2>
+                <div className="bg-indigo-50 p-6 rounded-lg shadow-inner mb-6">
+                  <p className="text-2xl md:text-3xl font-bold text-indigo-800 mb-4">
+                    Target: <span className="text-purple-700">{equationPuzzle.target}</span>
+                  </p>
+                  <p className="text-xl md:text-2xl text-gray-700">
+                    Gunakan angka: {equationPuzzle.numbers.join(', ')}
+                  </p>
+                </div>
+
+                <div className="bg-gray-100 p-4 rounded-lg shadow-inner mb-6 min-h-[60px] flex items-center justify-center">
+                  <p className="text-2xl md:text-3xl font-mono text-gray-900 break-all">
+                    {currentExpression || <span className="text-gray-400">Masukkan ekspresi...</span>}
+                  </p>
+                </div>
+
+                {/* Tombol Angka */}
+                <div className="grid grid-cols-3 gap-3 mb-4">
+                  {equationPuzzle.numbers.map((num, index) => (
+                    <button
+                      key={`eq-num-${index}`}
+                      onClick={() => handleEquationInput(num.toString())}
+                      className="bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 rounded-lg shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                    >
+                      {num}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Tombol Operator */}
+                <div className="grid grid-cols-4 gap-3 mb-6">
+                  {equationPuzzle.availableOperators.map((op, index) => (
+                    <button
+                      key={`eq-op-${index}`}
+                      onClick={() => handleEquationInput(op)}
+                      className="bg-purple-500 hover:bg-purple-600 text-white font-bold py-3 rounded-lg shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-purple-400"
+                    >
+                      {op}
+                    </button>
+                  ))}
+                  <button
+                    onClick={handleEquationClear}
+                    className="bg-red-500 hover:bg-red-600 text-white font-bold py-3 rounded-lg shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-red-400 col-span-2"
+                  >
+                    Clear
+                  </button>
+                  <button
+                    onClick={handleEquationSubmit}
+                    className="bg-green-500 hover:bg-green-600 text-white font-bold py-3 rounded-lg shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-green-400 col-span-2"
+                  >
+                    Cek
+                  </button>
+                </div>
+
+                {/* Tombol Lihat Langkah (Equation) */}
+                {!showSolution && (
+                  <button
+                    onClick={() => { setShowSolution(true); setMessage(`Langkah: ${equationPuzzle.solutionExpression} = ${equationPuzzle.target}`); playSoundEffect('hint'); }}
+                    className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-300 mb-4"
+                  >
+                    Lihat Langkah
+                  </button>
+                )}
+                {showSolution && (
+                  <div className="bg-yellow-50 p-4 rounded-lg shadow-inner mb-4">
+                    <p className="text-lg font-semibold text-yellow-800">
+                      Solusi: <span className="font-mono">{equationPuzzle.solutionExpression} = {equationPuzzle.target}</span>
+                    </p>
+                  </div>
+                )}
+                <button
+                  onClick={handleResetPuzzle}
+                  className="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-400 mb-8"
+                >
+                  Reset Puzzle
+                </button>
+              </>
+            )}
+
+            {/* Spatial Arrangement UI */}
+            {gameType === 'spatial' && spatialPuzzle && currentSpatialGrid && (
+              <>
+                <h2 className="text-2xl font-bold text-purple-700 mb-4">Susunan Spasial</h2>
+                <p className="text-gray-700 mb-6">Pindahkan blok berwarna agar sesuai dengan pola target.</p>
+
+                <div className="flex flex-wrap justify-around items-start mb-8 gap-4">
+                  {/* Current Grid */}
+                  <div className="flex flex-col items-center">
+                    <p className="font-semibold text-lg mb-2">Grid Anda:</p>
+                    <div className="grid grid-cols-2 gap-2 p-2 border-2 border-gray-300 rounded-lg bg-gray-50">
+                      {currentSpatialGrid.map((color, index) => (
+                        <div
+                          key={`current-spatial-${index}`}
+                          className={`w-20 h-20 rounded-md shadow-sm flex items-center justify-center text-white font-bold text-xl cursor-pointer transition-all duration-150 ${color ? `${color} hover:scale-105` : 'bg-gray-200'}`}
+                          onClick={() => handleSpatialClick(index)}
+                        >
+                          {color ? '' : 'KOSONG'}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Target Grid (for visual comparison) */}
+                  <div className="flex flex-col items-center">
+                    <p className="font-semibold text-lg mb-2">Target:</p>
+                    <div className="grid grid-cols-2 gap-2 p-2 border-2 border-indigo-300 rounded-lg bg-indigo-50">
+                      {spatialPuzzle.targetGrid.map((color, index) => (
+                        <div
+                          key={`target-spatial-${index}`}
+                          className={`w-20 h-20 rounded-md shadow-sm flex items-center justify-center text-white font-bold text-xl ${color ? `${color}` : 'bg-gray-300'}`}
+                        >
+                          {color ? '' : 'KOSONG'}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Tombol Lihat Langkah (Spatial) */}
+                {!showSolution && (
+                  <button
+                    onClick={() => { setShowSolution(true); setMessage(spatialPuzzle.solutionMoves); playSoundEffect('hint'); }}
+                    className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-300 mb-4"
+                  >
+                    Lihat Langkah
+                  </button>
+                )}
+                {showSolution && (
+                  <div className="bg-yellow-50 p-4 rounded-lg shadow-inner mb-4">
+                    <p className="text-lg font-semibold text-yellow-800">
+                      Solusi: <span className="font-mono">{spatialPuzzle.solutionMoves}</span>
+                    </p>
+                    <p className="text-md text-gray-700 mt-2">Pola Target:</p>
+                    <div className="grid grid-cols-2 gap-2 p-2 mx-auto w-fit border-2 border-indigo-400 rounded-lg bg-indigo-100">
+                      {spatialPuzzle.targetGrid.map((color, index) => (
+                        <div
+                          key={`solution-spatial-${index}`}
+                          className={`w-16 h-16 rounded-md shadow-sm ${color}`}
+                        ></div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <button
+                  onClick={handleResetPuzzle}
+                  className="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-400 mb-8"
+                >
+                  Reset Puzzle
+                </button>
+              </>
+            )}
+
+            {/* Shape Transformation UI */}
+            {gameType === 'shape' && shapePuzzle && currentShape && (
+              <>
+                <h2 className="text-2xl font-bold text-teal-700 mb-4">Transformasi Bentuk</h2>
+                <p className="text-gray-700 mb-6">Terapkan transformasi untuk mencocokkan bentuk target.</p>
+
+                <div className="flex flex-wrap justify-around items-start mb-8 gap-4">
+                  {/* Current Shape */}
+                  <div className="flex flex-col items-center">
+                    <p className="font-semibold text-lg mb-2">Bentuk Anda:</p>
+                    <div className="grid grid-cols-2 gap-0.5 p-1 border-2 border-gray-300 rounded-lg bg-gray-50">
+                      {currentShape.flat().map((val, index) => (
+                        <div
+                          key={`current-shape-${index}`}
+                          className={`w-16 h-16 rounded-sm ${val === 1 ? 'bg-teal-500' : 'bg-gray-200'}`}
+                        ></div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Target Shape */}
+                  <div className="flex flex-col items-center">
+                    <p className="font-semibold text-lg mb-2">Target:</p>
+                    <div className="grid grid-cols-2 gap-0.5 p-1 border-2 border-indigo-300 rounded-lg bg-indigo-50">
+                      {shapePuzzle.targetShape.flat().map((val, index) => (
+                        <div
+                          key={`target-shape-${index}`}
+                          className={`w-16 h-16 rounded-sm ${val === 1 ? 'bg-teal-600' : 'bg-gray-300'}`}
+                        ></div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Transform Buttons */}
+                <div className="flex flex-wrap justify-center gap-4 mb-6">
+                  <button
+                    onClick={() => applyShapeTransform('rotate')}
+                    className="bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                  >
+                    Putar 90°
+                  </button>
+                  <button
+                    onClick={() => applyShapeTransform('flipH')}
+                    className="bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                  >
+                    Balik Horizontal
+                  </button>
+                  <button
+                    onClick={() => applyShapeTransform('flipV')}
+                    className="bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-400"
+                  >
+                    Balik Vertikal
+                  </button>
+                </div>
+
+                {/* Tombol Lihat Langkah (Shape) */}
+                {!showSolution && (
+                  <button
+                    onClick={() => { setShowSolution(true); setMessage(`Langkah: ${shapePuzzle.solutionTransforms.join(' -> ')}`); playSoundEffect('hint'); }}
+                    className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-300 mb-4"
+                  >
+                    Lihat Langkah
+                  </button>
+                )}
+                {showSolution && (
+                  <div className="bg-yellow-50 p-4 rounded-lg shadow-inner mb-4">
+                    <p className="text-lg font-semibold text-yellow-800">
+                      Solusi: <span className="font-mono">{shapePuzzle.solutionTransforms.join(' -> ')}</span>
+                    </p>
+                  </div>
+                )}
+                <button
+                  onClick={handleResetPuzzle}
+                  className="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-400 mb-8"
+                >
+                  Reset Puzzle
+                </button>
+              </>
+            )}
+
+            {/* Number Grid Flow UI */}
+            {gameType === 'number-grid' && numberGridPuzzle && (
+              <>
+                <h2 className="text-2xl font-bold text-pink-700 mb-4">Number Grid Flow</h2>
+                <p className="text-gray-700 mb-6">
+                  Buat jalur dari <span className="font-bold text-pink-500">START</span> ke <span className="font-bold text-pink-500">END</span>.
+                  Setiap langkah harus mengubah angka dengan <span className="font-bold">{numberGridPuzzle.rule}{numberGridPuzzle.ruleValue}</span>.
+                </p>
+
+                <div className="grid grid-cols-3 gap-2 p-2 border-2 border-gray-300 rounded-lg bg-gray-50 mx-auto w-fit mb-6">
+                  {numberGridPuzzle.grid.map((row, rIdx) => (
+                    row.map((num, cIdx) => {
+                      const isStart = rIdx === numberGridPuzzle.start.row && cIdx === numberGridPuzzle.start.col;
+                      const isEnd = rIdx === numberGridPuzzle.end.row && cIdx === numberGridPuzzle.end.col;
+                      const inPath = currentPath.some(p => p.row === rIdx && p.col === cIdx);
+                      return (
+                        <div
+                          key={`num-grid-${rIdx}-${cIdx}`}
+                          className={`w-20 h-20 rounded-md shadow-sm flex flex-col items-center justify-center text-gray-900 font-bold text-xl cursor-pointer transition-all duration-150 border ${inPath ? 'bg-pink-200 border-pink-500' : 'bg-white border-gray-200 hover:scale-105'}`}
+                          onClick={() => handleNumberGridClick(rIdx, cIdx, num)}
+                        >
+                          <span>{num}</span>
+                          {isStart && <span className="text-xs text-pink-700 mt-1">START</span>}
+                          {isEnd && <span className="text-xs text-pink-700 mt-1">END</span>}
+                        </div>
+                      )
+                    })
+                  ))}
+                </div>
+
+                <div className="flex justify-center gap-4 mb-6">
+                  <button
+                    onClick={handleNumberGridClearPath}
+                    className="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-red-400"
+                  >
+                    Hapus Path
+                  </button>
+                </div>
+
+                {/* Tombol Lihat Langkah (Number Grid) */}
+                {!showSolution && (
+                  <button
+                    onClick={() => {
+                      setShowSolution(true);
+                      const pathStr = numberGridPuzzle.solutionPath.map(p => `(${p.row},${p.col})[${p.value}]`).join(' -> ');
+                      setMessage(`Langkah: Mulai dari START, ikuti jalur ini: ${pathStr}`);
+                      playSoundEffect('hint');
+                    }}
+                    className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-300 mb-4"
+                  >
+                    Lihat Langkah
+                  </button>
+                )}
+                {showSolution && (
+                  <div className="bg-yellow-50 p-4 rounded-lg shadow-inner mb-4">
+                    <p className="text-lg font-semibold text-yellow-800">
+                      Solusi Path: <span className="font-mono">{numberGridPuzzle.solutionPath.map(p => `(${p.row},${p.col})[${p.value}]`).join(' -> ')}</span>
+                    </p>
+                    <p className="text-md text-gray-700 mt-2">
+                        Aturan: Setiap langkah harus {numberGridPuzzle.rule}{numberGridPuzzle.ruleValue}.
+                    </p>
+                  </div>
+                )}
+                <button
+                  onClick={handleResetPuzzle}
+                  className="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-400 mb-8"
+                >
+                  Reset Puzzle
+                </button>
+              </>
+            )}
+
+            {/* Color Logic Bridge UI */}
+            {gameType === 'color-logic' && colorLogicPuzzle && currentColorGrid && (
+              <>
+                <h2 className="text-2xl font-bold text-orange-700 mb-4">Color Logic Bridge</h2>
+                <p className="text-gray-700 mb-6">
+                  Isi sel kosong dengan warna yang benar. Perhatikan aturan:
+                </p>
+                <ul className="list-disc list-inside text-gray-600 mb-6 mx-auto w-fit text-left">
+                  {colorLogicPuzzle.rules.map((rule, idx) => (
+                    <li key={`rule-${idx}`}>{rule}</li>
+                  ))}
+                </ul>
+
+                <div className="grid grid-cols-3 gap-2 p-2 border-2 border-gray-300 rounded-lg bg-gray-50 mx-auto w-fit mb-6">
+                  {currentColorGrid.map((row, rIdx) => (
+                    row.map((color, cIdx) => (
+                      <div
+                        key={`color-logic-${rIdx}-${cIdx}`}
+                        className={`w-20 h-20 rounded-md shadow-sm flex items-center justify-center text-white font-bold border ${color ? color : 'bg-gray-200 cursor-pointer hover:scale-105'}`}
+                        onClick={() => handleColorGridClick(rIdx, cIdx)}
+                      >
+                        {colorLogicPuzzle.initialGrid[rIdx][cIdx] ? '' : 'KLIK'}
+                      </div>
+                    ))
+                  ))}
+                </div>
+
+                {/* Tombol Lihat Langkah (Color Logic) */}
+                {!showSolution && (
+                  <button
+                    onClick={() => { setShowSolution(true); setMessage("Langkah: Lihat grid solusi di bawah ini."); playSoundEffect('hint'); }}
+                    className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-300 mb-4"
+                  >
+                    Lihat Langkah
+                  </button>
+                )}
+                {showSolution && (
+                  <div className="bg-yellow-50 p-4 rounded-lg shadow-inner mb-4">
+                    <p className="text-lg font-semibold text-yellow-800">
+                      Solusi Grid:
+                    </p>
+                    <div className="grid grid-cols-3 gap-2 p-2 mx-auto w-fit border-2 border-indigo-400 rounded-lg bg-indigo-100">
+                      {colorLogicPuzzle.solutionGrid.map((row, rIdx) => (
+                        row.map((color, cIdx) => (
+                          <div
+                            key={`solution-color-${rIdx}-${cIdx}`}
+                            className={`w-16 h-16 rounded-md shadow-sm ${color}`}
+                          ></div>
+                        ))
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <button
+                  onClick={handleResetPuzzle}
+                  className="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-400 mb-8"
+                >
+                  Reset Puzzle
+                </button>
+              </>
+            )}
+
+            {/* Sequence Solver UI */}
+            {gameType === 'sequence-solver' && sequencePuzzle && (
+              <>
+                <h2 className="text-2xl font-bold text-green-700 mb-4">Sequence Solver</h2>
+                <p className="text-gray-700 mb-6">
+                  Temukan pola dalam deret angka dan masukkan angka berikutnya.
+                </p>
+                <div className="bg-green-50 p-6 rounded-lg shadow-inner mb-6">
+                  <p className="text-2xl md:text-3xl font-bold text-green-800 mb-4">
+                    Deret: <span className="text-purple-700">{sequencePuzzle.sequence.join(', ')}, ?</span>
+                  </p>
+                </div>
+                <input
+                  type="number"
+                  value={sequenceInput}
+                  onChange={handleSequenceInputChange}
+                  placeholder="Angka berikutnya..."
+                  className="w-full max-w-xs p-3 rounded-lg border-2 border-gray-300 focus:outline-none focus:border-green-500 text-center text-xl mb-4"
+                />
+                <button
+                  onClick={handleSequenceSubmit}
+                  className="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-green-400 mb-4"
+                >
+                  Cek Jawaban
+                </button>
+
+                {!showSolution && (
+                  <button
+                    onClick={() => { setShowSolution(true); setMessage(`Langkah: Aturan: ${sequencePuzzle.ruleDescription}. Angka berikutnya: ${sequencePuzzle.nextNumber}`); playSoundEffect('hint'); }}
+                    className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-300 mb-4"
+                  >
+                    Lihat Langkah
+                  </button>
+                )}
+                {showSolution && (
+                  <div className="bg-yellow-50 p-4 rounded-lg shadow-inner mb-4">
+                    <p className="text-lg font-semibold text-yellow-800">
+                      Solusi: Aturan: <span className="font-mono">{sequencePuzzle.ruleDescription}</span>. Angka berikutnya: <span className="font-mono">{sequencePuzzle.nextNumber}</span>
+                    </p>
+                  </div>
+                )}
+                <button
+                  onClick={handleResetPuzzle}
+                  className="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-400 mb-8"
+                >
+                  Reset Puzzle
+                </button>
+              </>
+            )}
+
+            {/* Target Sum UI */}
+            {gameType === 'target-sum' && targetSumPuzzle && (
+              <>
+                <h2 className="text-2xl font-bold text-blue-700 mb-4">Target Sum</h2>
+                <p className="text-gray-700 mb-6">
+                  Pilih beberapa angka yang jumlahnya sama dengan target.
+                </p>
+                <div className="bg-blue-50 p-6 rounded-lg shadow-inner mb-6">
+                  <p className="text-2xl md:text-3xl font-bold text-blue-800 mb-4">
+                    Target: <span className="text-purple-700">{targetSumPuzzle.targetSum}</span>
+                  </p>
+                  <p className="text-xl md:text-2xl text-gray-700">
+                    Angka tersedia: {targetSumPuzzle.numbers.join(', ')}
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-4 gap-3 mb-6">
+                  {targetSumPuzzle.numbers.map((num, index) => (
+                    <button
+                      key={`target-num-${index}`}
+                      onClick={() => handleTargetSumClick(num)}
+                      className={`py-3 px-4 rounded-lg shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 ${selectedNumbers.includes(num) ? 'bg-blue-700 text-white ring-blue-500' : 'bg-blue-500 hover:bg-blue-600 text-white ring-blue-400'}`}
+                    >
+                      {num}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xl font-semibold text-gray-800 mb-4">
+                  Terpilih: {selectedNumbers.join(' + ')} = {selectedNumbers.reduce((sum, num) => sum + num, 0)}
+                </p>
+
+                {!showSolution && (
+                  <button
+                    onClick={() => { setShowSolution(true); setMessage(`Langkah: Subset: ${targetSumPuzzle.solutionSubset.join(' + ')} = ${targetSumPuzzle.targetSum}`); playSoundEffect('hint'); }}
+                    className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-300 mb-4"
+                  >
+                    Lihat Langkah
+                  </button>
+                )}
+                {showSolution && (
+                  <div className="bg-yellow-50 p-4 rounded-lg shadow-inner mb-4">
+                    <p className="text-lg font-semibold text-yellow-800">
+                      Solusi: Subset: <span className="font-mono">{targetSumPuzzle.solutionSubset.join(' + ')}</span> = <span className="font-mono">{targetSumPuzzle.targetSum}</span>
+                    </p>
+                  </div>
+                )}
+                <button
+                  onClick={handleResetPuzzle}
+                  className="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-400 mb-8"
+                >
+                  Reset Puzzle
+                </button>
+              </>
+            )}
+
+            {/* Pattern Matcher UI */}
+            {gameType === 'pattern-matcher' && patternMatcherPuzzle && (
+              <>
+                <h2 className="text-2xl font-bold text-yellow-700 mb-4">Pattern Matcher</h2>
+                <p className="text-gray-700 mb-6">
+                  Pilih pola berikutnya dalam urutan.
+                </p>
+                <div className="bg-yellow-50 p-6 rounded-lg shadow-inner mb-6 flex justify-center items-center gap-4 text-4xl">
+                  {patternMatcherPuzzle.patternSeries.map((pattern, index) => (
+                    <span key={`pattern-${index}`}>{pattern}</span>
+                  ))}
+                  <span className="text-gray-400">?</span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4 mb-6 max-w-md mx-auto">
+                  {patternMatcherPuzzle.options.map((option, index) => (
+                    <button
+                      key={`option-${index}`}
+                      onClick={() => handlePatternSelect(index)}
+                      className={`py-4 text-4xl rounded-lg shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 ${selectedPatternOption === index ? 'bg-yellow-700 text-white ring-yellow-500' : 'bg-yellow-500 hover:bg-yellow-600 text-white ring-yellow-400'}`}
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </div>
+
+                {!showSolution && (
+                  <button
+                    onClick={() => { setShowSolution(true); setMessage(`Langkah: Aturan: ${patternMatcherPuzzle.ruleDesc}. Pola berikutnya: ${patternMatcherPuzzle.options[patternMatcherPuzzle.correctOptionIndex]}`); playSoundEffect('hint'); }}
+                    className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-300 mb-4"
+                  >
+                    Lihat Langkah
+                  </button>
+                )}
+                {showSolution && (
+                  <div className="bg-yellow-50 p-4 rounded-lg shadow-inner mb-4">
+                    <p className="text-lg font-semibold text-yellow-800">
+                      Solusi: Aturan: <span className="font-mono">{patternMatcherPuzzle.ruleDesc}</span>. Pola berikutnya: <span className="font-mono">{patternMatcherPuzzle.options[patternMatcherPuzzle.correctOptionIndex]}</span>
+                    </p>
+                  </div>
+                )}
+                <button
+                  onClick={handleResetPuzzle}
+                  className="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-400 mb-8"
+                >
+                  Reset Puzzle
+                </button>
+              </>
+            )}
+
+            {/* Path Deduction UI */}
+            {gameType === 'path-deduction' && pathDeductionPuzzle && (
+              <>
+                <h2 className="text-2xl font-bold text-cyan-700 mb-4">Path Deduction</h2>
+                <p className="text-gray-700 mb-6">
+                  Temukan jalur dari START ke END. Aturan:
+                </p>
+                <ul className="list-disc list-inside text-gray-600 mb-6 mx-auto w-fit text-left">
+                  {pathDeductionPuzzle.rules.map((rule, idx) => (
+                    <li key={`pd-rule-${idx}`}>{rule}</li>
+                  ))}
+                </ul>
+
+                <div className="grid grid-cols-3 gap-2 p-2 border-2 border-gray-300 rounded-lg bg-gray-50 mx-auto w-fit mb-6">
+                  {pathDeductionPuzzle.grid.map((row, rIdx) => (
+                    row.map((cell, cIdx) => {
+                      const isStart = rIdx === pathDeductionPuzzle.start.row && cIdx === pathDeductionPuzzle.start.col;
+                      const isEnd = rIdx === pathDeductionPuzzle.end.row && cIdx === pathDeductionPuzzle.end.col;
+                      const inPath = currentDeductionPath.some(p => p.row === rIdx && p.col === cIdx);
+                      return (
+                        <div
+                          key={`pd-grid-${rIdx}-${cIdx}`}
+                          className={`w-20 h-20 rounded-md shadow-sm flex items-center justify-center text-gray-900 font-bold text-xl cursor-pointer transition-all duration-150 border ${inPath ? 'bg-cyan-200 border-cyan-500' : 'bg-white border-gray-200 hover:scale-105'} ${isStart ? 'bg-cyan-600 text-white' : ''} ${isEnd ? 'bg-cyan-600 text-white' : ''}`}
+                          onClick={() => handlePathDeductionClick(rIdx, cIdx)}
+                        >
+                          {isStart ? 'START' : isEnd ? 'END' : ''}
+                        </div>
+                      )
+                    })
+                  ))}
+                </div>
+
+                <div className="flex justify-center gap-4 mb-6">
+                  <button
+                    onClick={handlePathDeductionClear}
+                    className="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-red-400"
+                  >
+                    Hapus Jalur
+                  </button>
+                </div>
+
+                {!showSolution && (
+                  <button
+                    onClick={() => {
+                      setShowSolution(true);
+                      const pathStr = pathDeductionPuzzle.solutionPath.map(p => `(${p.row},${p.col})`).join(' -> ');
+                      setMessage(`Langkah: Ikuti jalur ini: ${pathStr}`);
+                      playSoundEffect('hint');
+                    }}
+                    className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-300 mb-4"
+                  >
+                    Lihat Langkah
+                  </button>
+                )}
+                {showSolution && (
+                  <div className="bg-yellow-50 p-4 rounded-lg shadow-inner mb-4">
+                    <p className="text-lg font-semibold text-yellow-800">
+                      Solusi Jalur: <span className="font-mono">{pathDeductionPuzzle.solutionPath.map(p => `(${p.row},${p.col})`).join(' -> ')}</span>
+                    </p>
+                  </div>
+                )}
+                <button
+                  onClick={handleResetPuzzle}
+                  className="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-400 mb-8"
+                >
+                  Reset Puzzle
+                </button>
+              </>
+            )}
+
+            {/* Sudoku Mini UI */}
+            {gameType === 'sudoku-mini' && sudokuMiniPuzzle && currentSudokuGrid && (
+              <>
+                <h2 className="text-2xl font-bold text-red-700 mb-4">Sudoku Mini (3x3)</h2>
+                <p className="text-gray-700 mb-6">
+                  Isi grid dengan angka 1-3. Setiap baris, kolom, dan blok 1x3 harus berisi setiap angka tepat satu kali.
+                </p>
+
+                <div className="grid grid-cols-3 gap-1 p-2 border-2 border-gray-300 rounded-lg bg-gray-50 mx-auto w-fit mb-6">
+                  {currentSudokuGrid.map((row, rIdx) => (
+                    row.map((cellValue, cIdx) => (
+                      <input
+                        key={`sudoku-${rIdx}-${cIdx}`}
+                        type="number"
+                        min="1"
+                        max="3"
+                        value={cellValue === null ? '' : cellValue}
+                        onChange={(e) => handleSudokuMiniInput(rIdx, cIdx, e.target.value)}
+                        className={`w-20 h-20 text-center text-2xl font-bold rounded-md shadow-sm border-2 ${sudokuMiniPuzzle.initialGrid[rIdx][cIdx] !== null ? 'bg-gray-200 text-gray-700 border-gray-300 cursor-not-allowed' : 'bg-white border-blue-300 focus:outline-none focus:border-blue-500'}`}
+                        readOnly={sudokuMiniPuzzle.initialGrid[rIdx][cIdx] !== null}
+                      />
+                    ))
+                  ))}
+                </div>
+
+                {!showSolution && (
+                  <button
+                    onClick={() => { setShowSolution(true); setMessage("Langkah: Lihat solusi grid di bawah ini."); playSoundEffect('hint'); }}
+                    className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-300 mb-4"
+                  >
+                    Lihat Langkah
+                  </button>
+                )}
+                {showSolution && (
+                  <div className="bg-yellow-50 p-4 rounded-lg shadow-inner mb-4">
+                    <p className="text-lg font-semibold text-yellow-800">
+                      Solusi Grid:
+                    </p>
+                    <div className="grid grid-cols-3 gap-1 p-2 mx-auto w-fit border-2 border-indigo-400 rounded-lg bg-indigo-100">
+                      {sudokuMiniPuzzle.solutionGrid.map((row, rIdx) => (
+                        row.map((cellValue, cIdx) => (
+                          <div
+                            key={`solution-sudoku-${rIdx}-${cIdx}`}
+                            className="w-16 h-16 rounded-md shadow-sm flex items-center justify-center text-gray-900 font-bold text-xl bg-white border-gray-200"
+                          >
+                            {cellValue}
+                          </div>
+                        ))
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <button
+                  onClick={handleResetPuzzle}
+                  className="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-400 mb-8"
+                >
+                  Reset Puzzle
+                </button>
+              </>
+            )}
+
+            {/* NEW GAMES UI START HERE */}
+            {/* Memory Match UI */}
+            {gameType === 'memory-match' && memoryPuzzle && (
+              <>
+                <h2 className="text-2xl font-bold text-purple-700 mb-4">Pencocokan Memori</h2>
+                <p className="text-gray-700 mb-6">
+                  Temukan semua pasangan simbol yang cocok.
+                </p>
+                <div className="grid grid-cols-4 gap-4 p-4 border-2 border-gray-300 rounded-lg bg-gray-50 mx-auto w-fit mb-6">
+                  {memoryPuzzle.cards.map((card, index) => (
+                    <button
+                      key={card.id}
+                      onClick={() => handleCardClick(index)}
+                      className={`w-20 h-20 rounded-lg shadow-md flex items-center justify-center text-4xl font-bold transition-all duration-200
+                        ${card.isMatched ? 'bg-green-300 cursor-default' : 'bg-blue-500 hover:bg-blue-600 text-white'}
+                        ${card.isRevealed && !card.isMatched ? 'bg-yellow-300' : ''}
+                        ${(card.isRevealed || card.isMatched) ? 'cursor-default' : 'cursor-pointer transform hover:scale-105'}
+                      `}
+                      disabled={revealedCards.length === 2 || card.isMatched || revealedCards.includes(index)}
+                    >
+                      {(card.isRevealed || card.isMatched) ? card.value : '❓'}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xl font-semibold text-gray-800 mb-4">
+                  Pasangan Ditemukan: {memoryPuzzle.pairsFound} / {memoryPuzzle.totalPairs}
+                </p>
+                {!showSolution && (
+                  <button
+                    onClick={() => { setShowSolution(true); setMessage("Langkah: Ingat posisi simbol untuk menemukan pasangan."); playSoundEffect('hint'); }}
+                    className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-300 mb-4"
+                  >
+                    Lihat Langkah
+                  </button>
+                )}
+                {showSolution && (
+                  <div className="bg-yellow-50 p-4 rounded-lg shadow-inner mb-4">
+                    <p className="text-lg font-semibold text-yellow-800">
+                      Solusi: Ingat posisi simbol. Pasangan adalah:
+                      <div className="grid grid-cols-4 gap-2 mt-2">
+                        {memoryPuzzle.cards.map((card) => (
+                          <span key={card.id} className="text-3xl">{card.value}</span>
+                        ))}
+                      </div>
+                    </p>
+                  </div>
+                )}
+                <button
+                  onClick={handleResetPuzzle}
+                  className="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-400 mb-8"
+                >
+                  Reset Puzzle
+                </button>
+              </>
+            )}
+
+            {/* Color Sequence UI */}
+            {gameType === 'color-sequence' && colorSequencePuzzle && (
+              <>
+                <h2 className="text-2xl font-bold text-yellow-700 mb-4">Urutan Warna</h2>
+                <p className="text-gray-700 mb-6">
+                  Perhatikan urutan warna dan ulangi.
+                </p>
+                <div className="bg-yellow-50 p-6 rounded-lg shadow-inner mb-6 min-h-[80px] flex items-center justify-center">
+                  {isPlayingSequence ? (
+                    <p className="text-3xl font-bold text-yellow-800 animate-pulse">
+                      Mengingat urutan...
+                    </p>
+                  ) : (
+                    <p className="text-3xl font-bold text-yellow-800">
+                      {playerSequenceInput.length > 0 ? playerSequenceInput.map(c => <span key={c} className={`inline-block w-8 h-8 rounded-full ${c}-500 mx-1`}></span>) : 'Tekan tombol warna untuk memulai!'}
+                    </p>
+                  )}
+                </div>
+                <div className="grid grid-cols-2 gap-4 mb-6 max-w-md mx-auto">
+                  {['red', 'blue', 'green', 'yellow', 'purple', 'orange'].map((color) => (
+                    <button
+                      key={color}
+                      onClick={() => handleColorSequenceClick(color)}
+                      className={`w-full py-4 rounded-lg shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2
+                        ${isPlayingSequence ? 'bg-gray-300 cursor-not-allowed' : `bg-${color}-500 hover:bg-${color}-600 text-white`}
+                      `}
+                      disabled={isPlayingSequence}
+                    >
+                      {/* Teks kosong, warna dari background */}
+                    </button>
+                  ))}
+                </div>
+                {!showSolution && (
+                  <button
+                    onClick={() => { setShowSolution(true); setMessage(`Langkah: Urutan yang benar adalah: ${colorSequencePuzzle.sequence.join(', ')}`); playSoundEffect('hint'); }}
+                    className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-300 mb-4"
+                  >
+                    Lihat Langkah
+                  </button>
+                )}
+                {showSolution && (
+                  <div className="bg-yellow-50 p-4 rounded-lg shadow-inner mb-4">
+                    <p className="text-lg font-semibold text-yellow-800">
+                      Solusi: Urutan: <span className="font-mono">{colorSequencePuzzle.sequence.join(' -> ')}</span>
+                    </p>
+                  </div>
+                )}
+                <button
+                  onClick={handleResetPuzzle}
+                  className="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-400 mb-8"
+                >
+                  Reset Puzzle
+                </button>
+              </>
+            )}
+
+            {/* Number Sort UI */}
+            {gameType === 'number-sort' && numberSortPuzzle && currentSortArray && (
+              <>
+                <h2 className="text-2xl font-bold text-purple-700 mb-4">Urutan Angka</h2>
+                <p className="text-gray-700 mb-6">
+                  Atur angka-angka dalam urutan menaik. Klik dua angka untuk menukarnya.
+                </p>
+                <div className="flex flex-wrap justify-center gap-3 p-4 border-2 border-gray-300 rounded-lg bg-gray-50 mx-auto w-fit mb-6">
+                  {currentSortArray.map((num, index) => (
+                    <button
+                      key={`sort-num-${index}`}
+                      onClick={() => {
+                        // Simple swap logic: if 1st selected, store; if 2nd, swap
+                        if (selectedNumbers.length === 0) {
+                          setSelectedNumbers([index]);
+                          setMessage(`Pilih angka kedua untuk ditukar dengan ${num}`);
+                        } else if (selectedNumbers.length === 1) {
+                          handleNumberSwap(selectedNumbers[0], index);
+                          setSelectedNumbers([]);
+                          setMessage("");
+                        }
+                      }}
+                      className={`w-20 h-20 rounded-lg shadow-md flex items-center justify-center text-2xl font-bold transition-all duration-150
+                        ${selectedNumbers.includes(index) ? 'bg-blue-700 text-white ring-2 ring-blue-500' : 'bg-blue-500 hover:bg-blue-600 text-white'}
+                      `}
+                    >
+                      {num}
+                    </button>
+                  ))}
+                </div>
+                {!showSolution && (
+                  <button
+                    onClick={() => { setShowSolution(true); setMessage(`Langkah: Urutan yang benar adalah: ${numberSortPuzzle.sortedArray.join(', ')}`); playSoundEffect('hint'); }}
+                    className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-300 mb-4"
+                  >
+                    Lihat Langkah
+                  </button>
+                )}
+                {showSolution && (
+                  <div className="bg-yellow-50 p-4 rounded-lg shadow-inner mb-4">
+                    <p className="text-lg font-semibold text-yellow-800">
+                      Solusi: <span className="font-mono">{numberSortPuzzle.sortedArray.join(' -> ')}</span>
+                    </p>
+                  </div>
+                )}
+                <button
+                  onClick={handleResetPuzzle}
+                  className="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-400 mb-8"
+                >
+                  Reset Puzzle
+                </button>
+              </>
+            )}
+
+            {/* Light Up Grid UI */}
+            {gameType === 'light-up-grid' && lightUpPuzzle && currentLightGrid && (
+              <>
+                <h2 className="text-2xl font-bold text-indigo-700 mb-4">Grid Penerangan</h2>
+                <p className="text-gray-700 mb-6">
+                  Klik sel untuk menyalakan/mematikan sel itu dan tetangganya. Nyalakan seluruh grid!
+                </p>
+                <div
+                  className={`grid gap-1 p-2 border-2 border-gray-300 rounded-lg bg-gray-50 mx-auto w-fit mb-6`}
+                  style={{ gridTemplateColumns: `repeat(${lightUpPuzzle.size}, minmax(0, 1fr))` }}
+                >
+                  {currentLightGrid.map((row, rIdx) => (
+                    row.map((isLit, cIdx) => (
+                      <button
+                        key={`light-grid-${rIdx}-${cIdx}`}
+                        onClick={() => handleLightClick(rIdx, cIdx)}
+                        className={`w-16 h-16 rounded-md shadow-sm transition-all duration-150
+                          ${isLit ? 'bg-yellow-400' : 'bg-gray-700'}
+                          hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-400
+                        `}
+                      >
+                      </button>
+                    ))
+                  ))}
+                </div>
+                {!showSolution && (
+                  <button
+                    onClick={() => { setShowSolution(true); setMessage("Langkah: Tidak ada langkah spesifik, ini adalah puzzle coba-coba."); playSoundEffect('hint'); }}
+                    className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-300 mb-4"
+                  >
+                    Lihat Langkah
+                  </button>
+                )}
+                {showSolution && (
+                  <div className="bg-yellow-50 p-4 rounded-lg shadow-inner mb-4">
+                    <p className="text-lg font-semibold text-yellow-800">
+                      Solusi: Tujuan adalah membuat semua sel menyala. Ini adalah puzzle coba-coba, tidak ada langkah tunggal.
+                    </p>
+                  </div>
+                )}
+                <button
+                  onClick={handleResetPuzzle}
+                  className="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-400 mb-8"
+                >
+                  Reset Puzzle
+                </button>
+              </>
+            )}
+
+            {/* Block Jigsaw UI */}
+            {gameType === 'block-jigsaw' && blockJigsawPuzzle && currentJigsawGrid && (
+              <>
+                <h2 className="text-2xl font-bold text-pink-700 mb-4">Jigsaw Blok</h2>
+                <p className="text-gray-700 mb-6">
+                  Susun ulang blok untuk membentuk pola target. Klik dua blok untuk menukarnya.
+                </p>
+                <div className="flex flex-wrap justify-around items-start mb-8 gap-4">
+                  {/* Current Grid */}
+                  <div className="flex flex-col items-center">
+                    <p className="font-semibold text-lg mb-2">Grid Anda:</p>
+                    <div
+                      className={`grid gap-1 p-2 border-2 border-gray-300 rounded-lg bg-gray-50`}
+                      style={{ gridTemplateColumns: `repeat(${blockJigsawPuzzle.gridSize}, minmax(0, 1fr))` }}
+                    >
+                      {currentJigsawGrid.flat().map((color, index) => (
+                        <button
+                          key={`jigsaw-current-${index}`}
+                          onClick={() => {
+                            if (selectedNumbers.length === 0) {
+                              setSelectedNumbers([index]);
+                              setMessage(`Pilih blok kedua untuk ditukar dengan blok ini.`);
+                            } else if (selectedNumbers.length === 1) {
+                              handleBlockSwap(selectedNumbers[0], index);
+                              setSelectedNumbers([]);
+                              setMessage("");
+                            }
+                          }}
+                          className={`w-16 h-16 rounded-md shadow-sm transition-all duration-150
+                            ${color}
+                            ${selectedNumbers.includes(index) ? 'ring-2 ring-blue-500 scale-105' : 'hover:scale-105'}
+                          `}
+                        >
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Target Grid */}
+                  <div className="flex flex-col items-center">
+                    <p className="font-semibold text-lg mb-2">Target:</p>
+                    <div
+                      className={`grid gap-1 p-2 border-2 border-indigo-300 rounded-lg bg-indigo-50`}
+                      style={{ gridTemplateColumns: `repeat(${blockJigsawPuzzle.gridSize}, minmax(0, 1fr))` }}
+                    >
+                      {blockJigsawPuzzle.targetGrid.flat().map((color, index) => (
+                        <div
+                          key={`jigsaw-target-${index}`}
+                          className={`w-16 h-16 rounded-md shadow-sm ${color}`}
+                        ></div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                {!showSolution && (
+                  <button
+                    onClick={() => { setShowSolution(true); setMessage("Langkah: Susun blok agar sesuai dengan pola target."); playSoundEffect('hint'); }}
+                    className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-300 mb-4"
+                  >
+                    Lihat Langkah
+                  </button>
+                )}
+                {showSolution && (
+                  <div className="bg-yellow-50 p-4 rounded-lg shadow-inner mb-4">
+                    <p className="text-lg font-semibold text-yellow-800">
+                      Solusi: Susun blok agar sesuai dengan pola target.
+                      <div
+                        className={`grid gap-1 p-2 mx-auto w-fit border-2 border-indigo-400 rounded-lg bg-indigo-100 mt-2`}
+                        style={{ gridTemplateColumns: `repeat(${blockJigsawPuzzle.gridSize}, minmax(0, 1fr))` }}
+                      >
+                        {blockJigsawPuzzle.targetGrid.flat().map((color, index) => (
+                          <div
+                            key={`solution-jigsaw-${index}`}
+                            className={`w-16 h-16 rounded-md shadow-sm ${color}`}
+                          ></div>
+                        ))}
+                      </div>
+                    </p>
+                  </div>
+                )}
+                <button
+                  onClick={handleResetPuzzle}
+                  className="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-400 mb-8"
+                >
+                  Reset Puzzle
+                </button>
+              </>
+            )}
+
+            {/* Weight Balance UI */}
+            {gameType === 'weight-balance' && weightBalancePuzzle && (
+              <>
+                <h2 className="text-2xl font-bold text-orange-700 mb-4">Keseimbangan Berat</h2>
+                <p className="text-gray-700 mb-6">
+                  Tempatkan berat di nampan kiri dan kanan agar total berat di setiap nampan mencapai <span className="font-bold text-orange-500">{weightBalancePuzzle.targetBalance}</span>.
+                </p>
+                <div className="flex justify-center items-center mb-6 gap-8">
+                  {/* Left Tray */}
+                  <div className="flex flex-col items-center bg-gray-100 p-4 rounded-lg shadow-inner w-40 h-40 border-2 border-gray-300">
+                    <p className="font-semibold text-lg mb-2">Nampan Kiri</p>
+                    <div className="flex flex-wrap justify-center gap-1">
+                      {leftTray.map((w, idx) => <span key={`left-${idx}`} className="bg-blue-300 text-blue-800 px-2 py-1 rounded-full text-sm">{w}</span>)}
+                    </div>
+                    <p className="mt-auto text-xl font-bold">Total: {leftTray.reduce((sum, w) => sum + w, 0)}</p>
+                  </div>
+                  {/* Scale Icon */}
+                  <span className="text-6xl">⚖️</span>
+                  {/* Right Tray */}
+                  <div className="flex flex-col items-center bg-gray-100 p-4 rounded-lg shadow-inner w-40 h-40 border-2 border-gray-300">
+                    <p className="font-semibold text-lg mb-2">Nampan Kanan</p>
+                    <div className="flex flex-wrap justify-center gap-1">
+                      {rightTray.map((w, idx) => <span key={`right-${idx}`} className="bg-green-300 text-green-800 px-2 py-1 rounded-full text-sm">{w}</span>)}
+                    </div>
+                    <p className="mt-auto text-xl font-bold">Total: {rightTray.reduce((sum, w) => sum + w, 0)}</p>
+                  </div>
+                </div>
+
+                <div className="mb-6">
+                  <p className="font-semibold text-lg mb-2">Berat Tersedia:</p>
+                  <div className="flex flex-wrap justify-center gap-2">
+                    {weightBalancePuzzle.availableWeights.map((w, idx) => (
+                      <button
+                        key={`weight-${idx}`}
+                        onClick={() => {
+                          // Simple logic: add to left if left sum < right sum, else add to right
+                          const sumLeft = leftTray.reduce((sum, val) => sum + val, 0);
+                          const sumRight = rightTray.reduce((sum, val) => sum + val, 0);
+                          if (sumLeft <= sumRight) {
+                            handleWeightPlacement(w, 'left');
+                          } else {
+                            handleWeightPlacement(w, 'right');
+                          }
+                        }}
+                        className="bg-gray-200 hover:bg-gray-300 px-4 py-2 rounded-full shadow-sm text-lg font-bold transition-all duration-150 hover:scale-105"
+                      >
+                        {w}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <button
+                  onClick={checkBalance}
+                  className="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-green-400 mb-4"
+                >
+                  Cek Keseimbangan
+                </button>
+                {!showSolution && (
+                  <button
+                    onClick={() => {
+                      setShowSolution(true);
+                      setMessage(`Langkah: Kiri: ${weightBalancePuzzle.solutionLeft.join(' + ')} = ${weightBalancePuzzle.targetBalance}, Kanan: ${weightBalancePuzzle.solutionRight.join(' + ')} = ${weightBalancePuzzle.targetBalance}`);
+                      playSoundEffect('hint');
+                    }}
+                    className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-300 mb-4"
+                  >
+                    Lihat Langkah
+                  </button>
+                )}
+                {showSolution && (
+                  <div className="bg-yellow-50 p-4 rounded-lg shadow-inner mb-4">
+                    <p className="text-lg font-semibold text-yellow-800">
+                      Solusi: Kiri: <span className="font-mono">{weightBalancePuzzle.solutionLeft.join(' + ')}</span> = {weightBalancePuzzle.targetBalance}, Kanan: <span className="font-mono">{weightBalancePuzzle.solutionRight.join(' + ')}</span> = {weightBalancePuzzle.targetBalance}
+                    </p>
+                  </div>
+                )}
+                <button
+                  onClick={handleResetPuzzle}
+                  className="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-400 mb-8"
+                >
+                  Reset Puzzle
+                </button>
+              </>
+            )}
+
+            {/* Grid Sum UI */}
+            {gameType === 'grid-sum' && gridSumPuzzle && currentGridSumGrid && (
+              <>
+                <h2 className="text-2xl font-bold text-teal-700 mb-4">Jumlah Grid</h2>
+                <p className="text-gray-700 mb-6">
+                  Isi sel kosong agar jumlah setiap baris dan kolom sesuai dengan target.
+                </p>
+                <div className="flex justify-center items-center mb-6">
+                  <div className="grid" style={{ gridTemplateColumns: `repeat(${gridSumPuzzle.size}, minmax(0, 1fr)) auto` }}>
+                    {currentGridSumGrid.map((row, rIdx) => (
+                      <React.Fragment key={`grid-sum-row-${rIdx}`}>
+                        {row.map((cellValue, cIdx) => (
+                          <input
+                            key={`grid-sum-cell-${rIdx}-${cIdx}`}
+                            type="number"
+                            min="1"
+                            max="9"
+                            value={cellValue === null ? '' : cellValue}
+                            onChange={(e) => handleGridSumInput(rIdx, cIdx, e.target.value)}
+                            className={`w-16 h-16 text-center text-xl font-bold border-2
+                              ${gridSumPuzzle.initialGrid[rIdx][cIdx] !== null ? 'bg-gray-200 text-gray-700 border-gray-300 cursor-not-allowed' : 'bg-white border-blue-300 focus:outline-none focus:border-blue-500'}
+                            `}
+                            readOnly={gridSumPuzzle.initialGrid[rIdx][cIdx] !== null}
+                          />
+                        ))}
+                        <div className="w-16 h-16 flex items-center justify-center font-bold text-lg bg-teal-100 border-2 border-teal-300">
+                          {gridSumPuzzle.rowSums[rIdx]}
+                        </div>
+                      </React.Fragment>
+                    ))}
+                    {/* Column Sums Row */}
+                    {gridSumPuzzle.colSums.map((sum, cIdx) => (
+                      <div key={`grid-sum-col-sum-${cIdx}`} className="w-16 h-16 flex items-center justify-center font-bold text-lg bg-teal-100 border-2 border-teal-300">
+                        {sum}
+                      </div>
+                    ))}
+                    {/* Bottom-right corner (empty or total sum) */}
+                    <div className="w-16 h-16 bg-gray-100 border-2 border-gray-300"></div>
+                  </div>
+                </div>
+                <button
+                  onClick={checkGridSumSolution}
+                  className="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-green-400 mb-4"
+                >
+                  Cek Jawaban
+                </button>
+                {!showSolution && (
+                  <button
+                    onClick={() => { setShowSolution(true); setMessage("Langkah: Lihat grid solusi di bawah ini."); playSoundEffect('hint'); }}
+                    className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-300 mb-4"
+                  >
+                    Lihat Langkah
+                  </button>
+                )}
+                {showSolution && (
+                  <div className="bg-yellow-50 p-4 rounded-lg shadow-inner mb-4">
+                    <p className="text-lg font-semibold text-yellow-800">
+                      Solusi Grid:
+                    </p>
+                    <div className="grid mx-auto w-fit" style={{ gridTemplateColumns: `repeat(${gridSumPuzzle.size}, minmax(0, 1fr))` }}>
+                      {gridSumPuzzle.solutionGrid.map((row, rIdx) => (
+                        <React.Fragment key={`solution-grid-sum-row-${rIdx}`}>
+                          {row.map((cellValue, cIdx) => (
+                            <div
+                              key={`solution-grid-sum-cell-${rIdx}-${cIdx}`}
+                              className="w-16 h-16 flex items-center justify-center text-xl font-bold bg-white border-2 border-gray-200"
+                            >
+                              {cellValue}
+                            </div>
+                          ))}
+                        </React.Fragment>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <button
+                  onClick={handleResetPuzzle}
+                  className="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-400 mb-8"
+                >
+                  Reset Puzzle
+                </button>
+              </>
+            )}
+
+            {/* Connect the Dots UI */}
+            {gameType === 'connect-the-dots' && connectDotsPuzzle && (
+              <>
+                <h2 className="text-2xl font-bold text-green-700 mb-4">Hubungkan Titik</h2>
+                <p className="text-gray-700 mb-6">
+                  Hubungkan titik-titik bernomor secara berurutan.
+                </p>
+                <div
+                  className="relative mx-auto border-2 border-gray-300 rounded-lg bg-gray-50 mb-6"
+                  style={{ width: connectDotsPuzzle.gridSize, height: connectDotsPuzzle.gridSize }}
+                >
+                  {/* Render dots */}
+                  {connectDotsPuzzle.dots.map((dot) => (
+                    <button
+                      key={`dot-${dot.id}`}
+                      onClick={() => handleDotClick(dot)}
+                      className={`absolute w-8 h-8 rounded-full flex items-center justify-center text-white font-bold text-sm transition-all duration-150
+                        ${lastConnectedDot && dot.order === lastConnectedDot.order + 1 ? 'bg-green-600 animate-pulse' : 'bg-blue-500 hover:bg-blue-600'}
+                      `}
+                      style={{ left: dot.x - 16, top: dot.y - 16 }}
+                    >
+                      {dot.order}
+                    </button>
+                  ))}
+                  {/* Render lines */}
+                  <svg className="absolute top-0 left-0 w-full h-full pointer-events-none">
+                    {connectedLines.map((line, idx) => (
+                      <line
+                        key={`line-${idx}`}
+                        x1={line.fromDot.x}
+                        y1={line.fromDot.y}
+                        x2={line.toDot.x}
+                        y2={line.toDot.y}
+                        stroke="blue"
+                        strokeWidth="3"
+                        className="transition-all duration-300"
+                      />
+                    ))}
+                  </svg>
+                </div>
+                <div className="flex justify-center gap-4 mb-6">
+                  <button
+                    onClick={handleConnectDotsClear}
+                    className="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-red-400"
+                  >
+                    Hapus Garis
+                  </button>
+                </div>
+                {!showSolution && (
+                  <button
+                    onClick={() => {
+                      setShowSolution(true);
+                      const pathStr = connectDotsPuzzle.solutionPath.map(p => `${p.from} -> ${p.to}`).join(', ');
+                      setMessage(`Langkah: Hubungkan titik-titik dalam urutan: ${pathStr}`);
+                      playSoundEffect('hint');
+                    }}
+                    className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-300 mb-4"
+                  >
+                    Lihat Langkah
+                  </button>
+                )}
+                {showSolution && (
+                  <div className="bg-yellow-50 p-4 rounded-lg shadow-inner mb-4">
+                    <p className="text-lg font-semibold text-yellow-800">
+                      Solusi: Urutan: <span className="font-mono">{connectDotsPuzzle.solutionPath.map(p => `${p.from} -> ${p.to}`).join(', ')}</span>
+                    </p>
+                  </div>
+                )}
+                <button
+                  onClick={handleResetPuzzle}
+                  className="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-400 mb-8"
+                >
+                  Reset Puzzle
+                </button>
+              </>
+            )}
+
+            {/* Tile Flip UI */}
+            {gameType === 'tile-flip' && tileFlipPuzzle && currentTileFlipGrid && (
+              <>
+                <h2 className="text-2xl font-bold text-blue-700 mb-4">Balik Ubin</h2>
+                <p className="text-gray-700 mb-6">
+                  Klik ubin untuk membalik ubin itu dan semua ubin yang berdekatan. Buat semua ubin menyala!
+                </p>
+                <div
+                  className={`grid gap-1 p-2 border-2 border-gray-300 rounded-lg bg-gray-50 mx-auto w-fit mb-6`}
+                  style={{ gridTemplateColumns: `repeat(${tileFlipPuzzle.size}, minmax(0, 1fr))` }}
+                >
+                  {currentTileFlipGrid.map((row, rIdx) => (
+                    row.map((isLit, cIdx) => (
+                      <button
+                        key={`tile-flip-${rIdx}-${cIdx}`}
+                        onClick={() => handleTileFlip(rIdx, cIdx)}
+                        className={`w-16 h-16 rounded-md shadow-sm transition-all duration-150
+                          ${isLit ? 'bg-yellow-400' : 'bg-gray-700'}
+                          hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-400
+                        `}
+                      >
+                      </button>
+                    ))
+                  ))}
+                </div>
+                {!showSolution && (
+                  <button
+                    onClick={() => { setShowSolution(true); setMessage("Langkah: Tidak ada langkah spesifik, ini adalah puzzle coba-coba."); playSoundEffect('hint'); }}
+                    className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-300 mb-4"
+                  >
+                    Lihat Langkah
+                  </button>
+                )}
+                {showSolution && (
+                  <div className="bg-yellow-50 p-4 rounded-lg shadow-inner mb-4">
+                    <p className="text-lg font-semibold text-yellow-800">
+                      Solusi: Tujuan adalah membuat semua ubin menyala. Ini adalah puzzle coba-coba, tidak ada langkah tunggal.
+                    </p>
+                  </div>
+                )}
+                <button
+                  onClick={handleResetPuzzle}
+                  className="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-400 mb-8"
+                >
+                  Reset Puzzle
+                </button>
+              </>
+            )}
+
+            {/* Color Fill UI */}
+            {gameType === 'color-fill' && colorFillPuzzle && currentColorFillGrid && (
+              <>
+                <h2 className="text-2xl font-bold text-gray-700 mb-4">Isi Warna</h2>
+                <p className="text-gray-700 mb-6">
+                  Klik sel untuk mengisi area yang terhubung dengan warna yang sama dengan warna target.
+                  Target Warna: <span className={`inline-block w-6 h-6 rounded-full ${colorFillPuzzle.targetColor}`}></span>
+                </p>
+                <div
+                  className={`grid gap-1 p-2 border-2 border-gray-300 rounded-lg bg-gray-50 mx-auto w-fit mb-6`}
+                  style={{ gridTemplateColumns: `repeat(${colorFillPuzzle.size}, minmax(0, 1fr))` }}
+                >
+                  {currentColorFillGrid.map((row, rIdx) => (
+                    row.map((color, cIdx) => (
+                      <button
+                        key={`color-fill-${rIdx}-${cIdx}`}
+                        onClick={() => handleColorFillStart(rIdx, cIdx)}
+                        className={`w-16 h-16 rounded-md shadow-sm transition-all duration-150
+                          ${color}
+                          hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-400
+                        `}
+                      >
+                      </button>
+                    ))
+                  ))}
+                </div>
+                {!showSolution && (
+                  <button
+                    onClick={() => { setShowSolution(true); setMessage("Langkah: Klik sel mana pun dengan warna yang sama dengan area yang ingin Anda ubah menjadi warna target."); playSoundEffect('hint'); }}
+                    className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-300 mb-4"
+                  >
+                    Lihat Langkah
+                  </button>
+                )}
+                {showSolution && (
+                  <div className="bg-yellow-50 p-4 rounded-lg shadow-inner mb-4">
+                    <p className="text-lg font-semibold text-yellow-800">
+                      Solusi: Klik sel mana pun untuk memulai pengisian banjir dengan warna target.
+                      Target Warna: <span className={`inline-block w-6 h-6 rounded-full ${colorFillPuzzle.targetColor}`}></span>
+                    </p>
+                  </div>
+                )}
+                <button
+                  onClick={handleResetPuzzle}
+                  className="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-6 rounded-full shadow-md transform transition-all duration-150 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-orange-400 mb-8"
+                >
+                  Reset Puzzle
+                </button>
+              </>
+            )}
+
+
+            {/* Tombol Kembali ke Pilihan Game */}
+            <button
+              onClick={() => setCurrentScreen('home')}
+              className="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-6 rounded-full shadow-lg transform transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-opacity-50 mt-8"
+            >
+              Kembali ke Pilihan Game
+            </button>
+          </div>
+        )}
+
+        {/* Footer */}
+        <div className="text-center text-sm text-gray-500 mt-8">
+          <p>&copy; 2025 MindFlow Game. Semua Hak Dilindungi.</p>
+          <p>Dibuat untuk mengasah logika dan matematika Anda.</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default App;
